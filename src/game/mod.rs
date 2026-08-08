@@ -127,7 +127,8 @@ impl Game {
     }
 
     fn tick_playing(&mut self, input: &Input, dt: f32) {
-        self.scroll_y += self.scheduler.script.scroll_speed * dt;
+        let scroll_dy = self.scheduler.script.scroll_speed * dt;
+        self.scroll_y += scroll_dy;
 
         self.player.update(input, dt);
         weapons::update(
@@ -146,7 +147,7 @@ impl Game {
         enemies::update(
             &mut self.enemies,
             &mut self.enemy_bullets,
-            self.scroll_y,
+            scroll_dy,
             self.player.x,
             self.player.y,
             dt,
