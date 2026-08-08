@@ -410,3 +410,99 @@ impl Game {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::levels::EnemyKind;
+
+    /// The subset of `Game` state this replay test can promise is
+    /// bit-for-bit identical across two runs of the same scripted input.
+    ///
+    /// Deliberately excludes `pickups` and `shop.cash`. `enemies::maybe_drop`
+    /// (`src/game/enemies.rs`, not owned by this task -- see mb-epic.23,
+    /// already filed for the real fix of threading a seeded RNG through)
+    /// rolls the global, unseeded `rand::random()` on every enemy death to
+    /// decide whether it drops a pickup. That roll is the *only* place
+    /// randomness enters `Game::tick`, so it -- and, downstream of it,
+    /// `shop.cash`, which is fed exclusively by collecting those pickups --
+    /// are the only state not reproducible across two otherwise-identical
+    /// runs. `score` is unaffected: it comes from the fixed `EnemyDied`
+    /// event `enemies::apply_damage` always pushes on a kill, computed and
+    /// pushed before `maybe_drop` is ever called for that death.
+    #[derive(Debug, PartialEq)]
+    struct Snapshot {
+        state: GameState,
+        player_x: f32,
+        player_y: f32,
+        player_hp: f32,
+        player_lives: u32,
+        score: u32,
+        level: usize,
+        scroll_y: f32,
+        enemy_positions: Vec<(EnemyKind, f32, f32)>,
+    }
+
+    fn snapshot(game: &Game) -> Snapshot {
+        Snapshot {
+            state: game.state,
+            player_x: game.player.x,
+            player_y: game.player.y,
+            player_hp: game.player.hp,
+            player_lives: game.player.lives,
+            score: game.score,
+            level: game.level,
+            scroll_y: game.scroll_y,
+            enemy_positions: game.enemies.iter().map(|e| (e.kind, e.x, e.y)).collect(),
+        }
+    }
+
+    /// Purely a function of the tick index -- no wall-clock time, no
+    /// randomness -- so replaying it from a fresh `Game::new()` reproduces
+    /// the exact same sequence of `Input`s every time. Fire is held the
+    /// whole run (the cannon keeps firing); the ship bobs up/down on a
+    /// fixed cadence but never strafes off the vertical line level 1's
+    /// first (centered) Popcorn wave spawns on, so the volley keeps
+    /// intersecting it as it falls and drifts back through center.
+    fn scripted_input(tick: usize) -> Input {
+        Input {
+            up: tick % 40 < 20,
+            down: tick % 40 >= 20,
+            left: false,
+            right: false,
+            fire: true,
+            pause: false,
+        }
+    }
+
+    fn run_script(ticks: usize) -> Game {
+        let mut game = Game::new();
+        let dt = 1.0 / 120.0;
+        for tick in 0..ticks {
+            game.tick(&scripted_input(tick), dt);
+        }
+        game
+    }
+
+    #[test]
+    fn deterministic_replay_same_input_script_produces_identical_state_twice() {
+        // Long enough to leave the menu, scroll past level 1's first
+        // wave's trigger (a centered Popcorn line at scroll_y 300), and
+        // have the continuously-firing cannon kill some of it.
+        let ticks = 3000;
+
+        let a = run_script(ticks);
+        let b = run_script(ticks);
+
+        // Sanity: the script actually drove the game somewhere -- not two
+        // blank starts trivially equal to each other.
+        assert_eq!(a.state, GameState::Playing);
+        assert!(a.scroll_y > 0.0);
+        assert!(
+            a.score > 0,
+            "expected the scripted volley to kill at least one enemy by tick {ticks}"
+        );
+
+        assert_eq!(snapshot(&a), snapshot(&b));
+    }
+}

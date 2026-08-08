@@ -359,4 +359,88 @@ mod tests {
         assert!(shots.is_empty());
         assert!(events.is_empty());
     }
+
+    #[test]
+    fn full_tier4_loadout_fires_cannon_side_rear_and_both_drones_in_one_volley() {
+        // Every ownership slot maxed out at once (spec: "downgrade-on-death
+        // tier floor" and the general volley-composition coverage above
+        // both exercise pieces of this individually -- this is the one
+        // combination test that fires them all together in a single
+        // `update()` call, the gap those tests don't close on their own).
+        let mut loadout = Loadout {
+            cannon_tier: 4,
+            has_side: true,
+            has_rear: true,
+            drones: 2,
+            fire_cooldown: 0.0,
+            drone_cooldown: 0.0,
+        };
+        let mut shots = Vec::new();
+        let mut events = Vec::new();
+
+        update(&mut loadout, &mut shots, 3.0, 4.0, true, 0.01, &mut events);
+
+        // Tier 4 cannon: 5 (1 forward + 4 fanned) + 2 side + 1 rear = 8,
+        // plus one autofired shot per drone = 10 total in this one volley.
+        let expected_total = 5 + 2 + 1 + 2;
+        assert_eq!(shots.len(), expected_total);
+        assert_eq!(events.len(), expected_total);
+
+        let forward = shots
+            .iter()
+            .filter(|s| s.vx == 0.0 && s.vy == -PROJECTILE_SPEED)
+            .count();
+        // The tier-1 base forward shot plus each drone's own forward shot.
+        assert_eq!(forward, 1 + loadout.drones as usize);
+        assert_eq!(
+            shots
+                .iter()
+                .filter(|s| s.vx == -PROJECTILE_SPEED && s.vy == 0.0)
+                .count(),
+            1,
+            "exactly one left side shot"
+        );
+        assert_eq!(
+            shots
+                .iter()
+                .filter(|s| s.vx == PROJECTILE_SPEED && s.vy == 0.0)
+                .count(),
+            1,
+            "exactly one right side shot"
+        );
+        assert_eq!(
+            shots
+                .iter()
+                .filter(|s| s.vx == 0.0 && s.vy == PROJECTILE_SPEED)
+                .count(),
+            1,
+            "exactly one rear shot"
+        );
+        // The 4 fanned tier-4 cannon projectiles: neither purely forward,
+        // side, nor rear -- distinguishable from every category above.
+        let fanned = shots
+            .iter()
+            .filter(|s| s.vx != 0.0 && s.vy < 0.0 && s.vy != -PROJECTILE_SPEED)
+            .count();
+        assert_eq!(fanned, 4);
+        for s in &shots {
+            assert!((speed_sq(s) - PROJECTILE_SPEED * PROJECTILE_SPEED).abs() < 1e-1);
+            assert_eq!((s.x, s.y), (3.0, 4.0));
+        }
+    }
+
+    #[test]
+    fn downgrade_steps_down_one_tier_and_floors_at_tier_one() {
+        let mut loadout = Loadout {
+            cannon_tier: 3,
+            ..Loadout::default()
+        };
+        downgrade(&mut loadout);
+        assert_eq!(loadout.cannon_tier, 2);
+        downgrade(&mut loadout);
+        assert_eq!(loadout.cannon_tier, 1);
+        // Already at the floor: stays at 1, does not wrap or underflow.
+        downgrade(&mut loadout);
+        assert_eq!(loadout.cannon_tier, 1);
+    }
 }
