@@ -162,11 +162,137 @@ fn level_1() -> LevelScript {
     }
 }
 
-/// Placeholder for Wave 4 `levels-level2-bosses`.
+/// Level 2: the escalation script (spec: "level 2 escalates (weavers,
+/// dense turrets) ... each ending in the boss"). Introduces Weaver
+/// (absent from level 1) and makes Turret genuinely dense: higher
+/// counts per wave (4-7, vs level 1's 2-3) laid out with tight entry
+/// spacing (70-100px, vs level 1's 220-260px "sparse" spread), and the
+/// waves themselves trigger closer together (210-230px gaps, vs level
+/// 1's 350-400px) -- still respecting the same >= 200px no-overlap
+/// floor level 1 used, so nothing stacks on top of the previous wave.
+/// Ends in a Boss wave with generous clearing room after the last
+/// regular wave.
 fn level_2() -> LevelScript {
     LevelScript {
         scroll_speed: 40.0,
-        waves: Vec::new(),
+        waves: vec![
+            (
+                200.0,
+                Wave {
+                    enemy: EnemyKind::Weaver,
+                    count: 4,
+                    pattern: EntryPattern::V,
+                    spacing: 70.0,
+                },
+            ),
+            (
+                // First dense turret wave: already more turrets, packed
+                // tighter, than either of level 1's sparse ones.
+                420.0,
+                Wave {
+                    enemy: EnemyKind::Turret,
+                    count: 4,
+                    pattern: EntryPattern::Column,
+                    spacing: 100.0,
+                },
+            ),
+            (
+                650.0,
+                Wave {
+                    enemy: EnemyKind::Weaver,
+                    count: 5,
+                    pattern: EntryPattern::Line,
+                    spacing: 60.0,
+                },
+            ),
+            (
+                870.0,
+                Wave {
+                    enemy: EnemyKind::Turret,
+                    count: 5,
+                    pattern: EntryPattern::Line,
+                    spacing: 90.0,
+                },
+            ),
+            (
+                1090.0,
+                Wave {
+                    enemy: EnemyKind::Weaver,
+                    count: 6,
+                    pattern: EntryPattern::V,
+                    spacing: 55.0,
+                },
+            ),
+            (
+                1300.0,
+                Wave {
+                    enemy: EnemyKind::Turret,
+                    count: 6,
+                    pattern: EntryPattern::Column,
+                    spacing: 75.0,
+                },
+            ),
+            (
+                1520.0,
+                Wave {
+                    enemy: EnemyKind::Weaver,
+                    count: 5,
+                    pattern: EntryPattern::Line,
+                    spacing: 60.0,
+                },
+            ),
+            (
+                // Densest turret wave of the level: 7 turrets, tightest
+                // entry spacing, right before the boss.
+                1730.0,
+                Wave {
+                    enemy: EnemyKind::Turret,
+                    count: 7,
+                    pattern: EntryPattern::Line,
+                    spacing: 70.0,
+                },
+            ),
+            (
+                // Boss: same "single entity, pattern/spacing moot" note
+                // as level 1's boss wave. Large gap after the last
+                // regular wave so it has room to clear first.
+                2200.0,
+                Wave {
+                    enemy: EnemyKind::Boss,
+                    count: 1,
+                    pattern: EntryPattern::Line,
+                    spacing: 0.0,
+                },
+            ),
+        ],
+    }
+}
+
+/// Per-level boss pattern-color variant (spec: "each ending in the boss
+/// with pattern colors varied"): a small value keyed by the same 1-based
+/// level number as [`level`], for `game::enemies`'s Boss pattern-picking
+/// logic to read so its three cycling attack patterns (aimed spread,
+/// wall-with-gap, spiral) can render with a different color/palette per
+/// level instead of an identical hardcoded one.
+///
+/// This is a free function rather than a new field on [`LevelScript`]:
+/// `LevelScript` is already built with plain struct-literal syntax
+/// outside this file (`game::waves`'s tests construct one directly), so
+/// adding a field would require also editing that file to supply it --
+/// out of scope for this task (`src/levels.rs` only). A function keyed
+/// on the level number gives `game::enemies` the same per-level signal
+/// without that edit.
+///
+/// Not wired up yet -- `game::enemies`'s Boss doesn't currently take a
+/// level number anywhere along its spawn/update path. That's a follow-up
+/// for `enemies.rs`: call `levels::boss_variant(level)` at Boss spawn
+/// time, stash the result on the Boss enemy, and use it to pick the
+/// bullet color/palette for its attack patterns.
+pub fn boss_variant(level: usize) -> u32 {
+    match level {
+        1 => 0,
+        2 => 1,
+        _ => 0,
     }
 }
 
@@ -211,5 +337,76 @@ mod tests {
                 "waves should be spaced far enough apart not to overlap"
             );
         }
+    }
+
+    #[test]
+    fn level_2_escalates_with_weavers_and_dense_turrets_then_ends_in_boss() {
+        let script = level_2();
+        let kinds: Vec<EnemyKind> = script.waves.iter().map(|(_, w)| w.enemy).collect();
+
+        assert!(
+            kinds.contains(&EnemyKind::Weaver),
+            "level 2 must introduce weavers"
+        );
+
+        let turret_waves: Vec<_> = script
+            .waves
+            .iter()
+            .filter(|(_, w)| w.enemy == EnemyKind::Turret)
+            .collect();
+        let weaver_waves: Vec<_> = script
+            .waves
+            .iter()
+            .filter(|(_, w)| w.enemy == EnemyKind::Weaver)
+            .collect();
+        assert!(turret_waves.len() >= 2);
+        assert!(weaver_waves.len() >= 2);
+
+        // "Dense" turrets: every level 2 turret wave beats level 1's max
+        // count (3) and every level 2 turret wave's max count beats
+        // level 1's, i.e. the escalation is real, not just "some wave
+        // somewhere".
+        for (_, w) in &turret_waves {
+            assert!(w.count > 3, "level 2 turret waves must out-count level 1");
+        }
+        let max_turret_count = turret_waves.iter().map(|(_, w)| w.count).max().unwrap();
+        assert!(max_turret_count > 3);
+
+        let (_, last_wave) = script.waves.last().expect("level 2 has waves");
+        assert_eq!(last_wave.enemy, EnemyKind::Boss);
+        assert_eq!(last_wave.count, 1);
+    }
+
+    #[test]
+    fn level_2_triggers_are_strictly_increasing_well_spaced_and_tighter_than_level_1() {
+        let script = level_2();
+        for window in script.waves.windows(2) {
+            let (a, _) = &window[0];
+            let (b, _) = &window[1];
+            assert!(b > a, "triggers must be in increasing order");
+            assert!(
+                b - a >= 200.0,
+                "waves should be spaced far enough apart not to overlap"
+            );
+        }
+
+        // "Closer trigger spacing than level 1's sparse turrets": the
+        // smallest gap anywhere in level 2 is tighter than the smallest
+        // gap anywhere in level 1, while both stay at/above the 200px
+        // no-overlap floor.
+        let min_gap = |waves: &[(f32, Wave)]| -> f32 {
+            waves
+                .windows(2)
+                .map(|w| w[1].0 - w[0].0)
+                .fold(f32::INFINITY, f32::min)
+        };
+        assert!(min_gap(&level_2().waves) < min_gap(&level_1().waves));
+    }
+
+    #[test]
+    fn boss_variant_differs_between_level_1_and_level_2() {
+        // "Pattern colors varied": the two levels must not resolve to
+        // the same variant value.
+        assert_ne!(boss_variant(1), boss_variant(2));
     }
 }
