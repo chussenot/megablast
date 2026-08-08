@@ -16,6 +16,9 @@ pub mod weapons;
 mod collide;
 mod waves;
 
+use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
+
 use crate::events::GameEvent;
 use crate::levels;
 
@@ -79,6 +82,12 @@ pub struct Game {
     /// the shop's first tick. `None` means "just entered the shop,
     /// seed only" -- reset there by `tick_shop` on every leave.
     shop_prev_input: Option<Input>,
+    /// The simulation's one source of randomness (currently: whether a
+    /// killed enemy drops a pickup, see `resolve_collisions`). Seeded
+    /// explicitly rather than reaching for the global thread-local RNG,
+    /// so "same level data + same seed => identical playthrough" (spec)
+    /// actually holds -- see `with_seed`.
+    rng: StdRng,
 }
 
 impl Default for Game {
@@ -88,7 +97,23 @@ impl Default for Game {
 }
 
 impl Game {
+    /// Fresh game for real play: seeded from the current time, so two
+    /// separate playthroughs still see independent drop rolls. For a
+    /// reproducible run (tests, bug-report replays), use `with_seed`.
     pub fn new() -> Self {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        Self::with_seed(seed)
+    }
+
+    /// Same as `new()`, but every random choice in the simulation is
+    /// drawn from an RNG seeded with `seed` -- two `Game`s built this way
+    /// and driven by the same scripted input produce bit-for-bit
+    /// identical state (spec: "same level data + same seed => identical
+    /// playthrough").
+    pub fn with_seed(seed: u64) -> Self {
         Self {
             events: Vec::new(),
             state: GameState::Menu,
@@ -106,6 +131,7 @@ impl Game {
             scheduler: waves::Scheduler::new(levels::level(1)),
             pause_was_held: false,
             shop_prev_input: None,
+            rng: StdRng::seed_from_u64(seed),
         }
     }
 
@@ -293,8 +319,9 @@ impl Game {
                 enemies::apply_damage(&mut self.enemies, i, shot.damage as i32, &mut self.events)
             {
                 self.score += enemies::score_value(death.kind);
+                let roll = self.rng.random();
                 if let Some(p) =
-                    enemies::maybe_drop(death.kind, death.x, death.y, death.credit_value)
+                    enemies::maybe_drop(death.kind, death.x, death.y, death.credit_value, roll)
                 {
                     self.pickups.push(p);
                 }
@@ -422,20 +449,12 @@ mod tests {
     use super::*;
     use crate::levels::EnemyKind;
 
-    /// The subset of `Game` state this replay test can promise is
-    /// bit-for-bit identical across two runs of the same scripted input.
-    ///
-    /// Deliberately excludes `pickups` and `shop.cash`. `enemies::maybe_drop`
-    /// (`src/game/enemies.rs`, not owned by this task -- see mb-epic.23,
-    /// already filed for the real fix of threading a seeded RNG through)
-    /// rolls the global, unseeded `rand::random()` on every enemy death to
-    /// decide whether it drops a pickup. That roll is the *only* place
-    /// randomness enters `Game::tick`, so it -- and, downstream of it,
-    /// `shop.cash`, which is fed exclusively by collecting those pickups --
-    /// are the only state not reproducible across two otherwise-identical
-    /// runs. `score` is unaffected: it comes from the fixed `EnemyDied`
-    /// event `enemies::apply_damage` always pushes on a kill, computed and
-    /// pushed before `maybe_drop` is ever called for that death.
+    /// The subset of `Game` state this replay test promises is
+    /// bit-for-bit identical across two runs of the same scripted input
+    /// from the same seed. `pickups`/`shop.cash` are included now that
+    /// mb-epic.23 threads a seeded RNG through `Game` -- the drop roll
+    /// (the simulation's only random choice) is deterministic given the
+    /// same seed, so there is no longer any excluded state.
     #[derive(Debug, PartialEq)]
     struct Snapshot {
         state: GameState,
@@ -444,9 +463,11 @@ mod tests {
         player_hp: f32,
         player_lives: u32,
         score: u32,
+        cash: u32,
         level: usize,
         scroll_y: f32,
         enemy_positions: Vec<(EnemyKind, f32, f32)>,
+        pickups: Vec<(f32, f32, u32)>,
     }
 
     fn snapshot(game: &Game) -> Snapshot {
@@ -457,19 +478,22 @@ mod tests {
             player_hp: game.player.hp,
             player_lives: game.player.lives,
             score: game.score,
+            cash: game.shop.cash,
             level: game.level,
             scroll_y: game.scroll_y,
             enemy_positions: game.enemies.iter().map(|e| (e.kind, e.x, e.y)).collect(),
+            pickups: game.pickups.iter().map(|p| (p.x, p.y, p.value)).collect(),
         }
     }
 
     /// Purely a function of the tick index -- no wall-clock time, no
-    /// randomness -- so replaying it from a fresh `Game::new()` reproduces
-    /// the exact same sequence of `Input`s every time. Fire is held the
-    /// whole run (the cannon keeps firing); the ship bobs up/down on a
-    /// fixed cadence but never strafes off the vertical line level 1's
-    /// first (centered) Popcorn wave spawns on, so the volley keeps
-    /// intersecting it as it falls and drifts back through center.
+    /// randomness -- so replaying it from `Game::with_seed(seed)` (same
+    /// seed both times) reproduces the exact same sequence of `Input`s
+    /// every time. Fire is held the whole run (the cannon keeps firing);
+    /// the ship bobs up/down on a fixed cadence but never strafes off
+    /// the vertical line level 1's first (centered) Popcorn wave spawns
+    /// on, so the volley keeps intersecting it as it falls and drifts
+    /// back through center.
     fn scripted_input(tick: usize) -> Input {
         Input {
             up: tick % 40 < 20,
@@ -481,8 +505,8 @@ mod tests {
         }
     }
 
-    fn run_script(ticks: usize) -> Game {
-        let mut game = Game::new();
+    fn run_script(ticks: usize, seed: u64) -> Game {
+        let mut game = Game::with_seed(seed);
         let dt = 1.0 / 120.0;
         for tick in 0..ticks {
             game.tick(&scripted_input(tick), dt);
@@ -496,9 +520,10 @@ mod tests {
         // wave's trigger (a centered Popcorn line at scroll_y 300), and
         // have the continuously-firing cannon kill some of it.
         let ticks = 3000;
+        let seed = 0xC0FFEE;
 
-        let a = run_script(ticks);
-        let b = run_script(ticks);
+        let a = run_script(ticks, seed);
+        let b = run_script(ticks, seed);
 
         // Sanity: the script actually drove the game somewhere -- not two
         // blank starts trivially equal to each other.
@@ -510,5 +535,25 @@ mod tests {
         );
 
         assert_eq!(snapshot(&a), snapshot(&b));
+    }
+
+    #[test]
+    fn deterministic_replay_with_a_different_seed_can_diverge_in_drops() {
+        // Companion to the test above: a different seed is *allowed* to
+        // change which Popcorn kills drop a pickup (score/positions/etc.
+        // still match -- only the RNG-fed fields can differ), otherwise
+        // `with_seed` wouldn't actually be threading the seed anywhere.
+        let ticks = 3000;
+        let a = run_script(ticks, 1);
+        let b = run_script(ticks, 2);
+
+        assert_eq!(a.score, b.score, "score never depends on the drop roll");
+        assert_ne!(
+            (a.shop.cash, a.pickups.len()),
+            (b.shop.cash, b.pickups.len()),
+            "expected two different seeds to disagree on at least one drop \
+             over {ticks} ticks -- if this ever flakes, the seed likely \
+             isn't reaching the drop roll at all"
+        );
     }
 }

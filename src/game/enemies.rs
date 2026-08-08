@@ -361,12 +361,17 @@ pub fn apply_damage(
 }
 
 /// Drop table: 20% of Popcorn, 100% of everything else (spec).
-pub fn maybe_drop(kind: EnemyKind, x: f32, y: f32, credit_value: u32) -> Option<Pickup> {
+/// `roll` is a caller-supplied value in `[0, 1)` deciding the drop --
+/// pure and deterministic given the same `roll`, rather than reaching
+/// for the global thread-local RNG itself, so `Game::with_seed`'s
+/// reproducibility guarantee extends to this, the simulation's only
+/// random choice (mb-epic.23).
+pub fn maybe_drop(kind: EnemyKind, x: f32, y: f32, credit_value: u32, roll: f32) -> Option<Pickup> {
     let chance = match kind {
         EnemyKind::Popcorn => 0.2,
         _ => 1.0,
     };
-    if rand::random::<f32>() < chance {
+    if roll < chance {
         Some(Pickup {
             x,
             y,
@@ -633,7 +638,7 @@ mod tests {
     fn maybe_drop_popcorn_drops_about_20_percent_of_the_time() {
         let trials = 10_000;
         let drops = (0..trials)
-            .filter(|_| maybe_drop(EnemyKind::Popcorn, 0.0, 0.0, 5).is_some())
+            .filter(|_| maybe_drop(EnemyKind::Popcorn, 0.0, 0.0, 5, rand::random()).is_some())
             .count();
         let rate = drops as f32 / trials as f32;
         assert!(
@@ -652,7 +657,7 @@ mod tests {
             EnemyKind::Boss,
         ] {
             let drops = (0..trials)
-                .filter(|_| maybe_drop(kind, 1.0, 2.0, 7).is_some())
+                .filter(|_| maybe_drop(kind, 1.0, 2.0, 7, rand::random()).is_some())
                 .count();
             assert_eq!(
                 drops, trials,
@@ -662,8 +667,20 @@ mod tests {
     }
 
     #[test]
+    fn maybe_drop_is_a_pure_function_of_its_roll() {
+        // mb-epic.23: the caller (Game::resolve_collisions) now supplies
+        // the roll from its own seeded RNG -- this function itself must
+        // stay a pure function of that roll for the reproducibility
+        // guarantee to actually hold.
+        assert!(maybe_drop(EnemyKind::Popcorn, 0.0, 0.0, 5, 0.1).is_some());
+        assert!(maybe_drop(EnemyKind::Popcorn, 0.0, 0.0, 5, 0.2).is_none());
+        assert!(maybe_drop(EnemyKind::Popcorn, 0.0, 0.0, 5, 0.9).is_none());
+        assert!(maybe_drop(EnemyKind::Boss, 0.0, 0.0, 5, 0.9999).is_some());
+    }
+
+    #[test]
     fn maybe_drop_returns_the_death_position_and_credit_value() {
-        let pickup = maybe_drop(EnemyKind::Diver, 42.0, 84.0, 10).expect("diver always drops");
+        let pickup = maybe_drop(EnemyKind::Diver, 42.0, 84.0, 10, 0.0).expect("diver always drops");
         assert_eq!(pickup.x, 42.0);
         assert_eq!(pickup.y, 84.0);
         assert_eq!(pickup.value, 10);
