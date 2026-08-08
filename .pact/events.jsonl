@@ -51,3 +51,12 @@
 {"at":"2026-08-08T17:58:56.067076580+00:00","agent":"w5-tests","kind":"acquired","path":"src/game/shop.rs","detail":"wave5 mb-epic.19: w5-tests","ttl_secs":2700,"chain_hash":"a942ba9efb7b02d0"}
 {"at":"2026-08-08T18:00:51.674367265+00:00","agent":"w5-docs","kind":"released","path":".github/workflows/ci.yml","detail":"wave5 mb-epic.20: w5-docs","ttl_secs":2700,"chain_hash":"0d0c9d2738200534"}
 {"at":"2026-08-08T18:00:51.674580316+00:00","agent":"w5-docs","kind":"released","path":"README.md","detail":"wave5 mb-epic.20: w5-docs","ttl_secs":2700,"chain_hash":"4306435b2a99699a"}
+{"at":"2026-08-08T18:03:18.549246093+00:00","agent":"w5-parallax","kind":"released","path":"src/render/background.rs","detail":"wave5 mb-epic.17: w5-parallax","ttl_secs":2700,"chain_hash":"781c3440d3c3ed8d"}
+{"at":"2026-08-08T18:04:52.326527765+00:00","agent":"w5-tests","kind":"released","path":"src/game/collide.rs","detail":"wave5 mb-epic.19: w5-tests","ttl_secs":2700,"chain_hash":"c0ebbc3a4846c6b2"}
+{"at":"2026-08-08T18:04:52.326722651+00:00","agent":"w5-tests","kind":"released","path":"src/game/mod.rs","detail":"wave5 mb-epic.19: w5-tests","ttl_secs":2700,"chain_hash":"500766120e5d94af"}
+{"at":"2026-08-08T18:04:52.326893954+00:00","agent":"w5-tests","kind":"released","path":"src/game/shop.rs","detail":"wave5 mb-epic.19: w5-tests","ttl_secs":2700,"chain_hash":"7e655b87bc1a7dd3"}
+{"at":"2026-08-08T18:04:52.327145457+00:00","agent":"w5-tests","kind":"released","path":"src/game/waves.rs","detail":"wave5 mb-epic.19: w5-tests","ttl_secs":2700,"chain_hash":"24130f9a996a5ad1"}
+{"at":"2026-08-08T18:04:52.327347939+00:00","agent":"w5-tests","kind":"released","path":"src/game/weapons.rs","detail":"wave5 mb-epic.19: w5-tests","ttl_secs":2700,"chain_hash":"8ce273515c76e663"}
+{"at":"2026-08-08T18:07:25.097228998+00:00","agent":"w5-juice","kind":"released","path":"src/render/hud.rs","detail":"wave5 mb-epic.18: w5-juice","ttl_secs":2700,"chain_hash":"55f6fa56ce176c6f"}
+{"at":"2026-08-08T18:07:25.097423527+00:00","agent":"w5-juice","kind":"released","path":"src/render/mod.rs","detail":"wave5 mb-epic.18: w5-juice","ttl_secs":2700,"chain_hash":"8767a50630f35463"}
+{"at":"2026-08-08T18:07:25.097595994+00:00","agent":"w5-juice","kind":"released","path":"src/render/sprites.rs","detail":"wave5 mb-epic.18: w5-juice","ttl_secs":2700,"chain_hash":"637e1e4855f43802"}
