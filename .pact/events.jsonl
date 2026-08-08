@@ -38,3 +38,16 @@
 {"at":"2026-08-08T17:49:07.563552706+00:00","agent":"w4-levels","kind":"released","path":"src/levels.rs","detail":"wave4 mb-epic.16: w4-levels","ttl_secs":2700,"chain_hash":"a3570003d37be692"}
 {"at":"2026-08-08T17:52:04.065655965+00:00","agent":"w4-shopui","kind":"released","path":"src/game/mod.rs","detail":"wave4 mb-epic.15: w4-shopui","ttl_secs":2700,"chain_hash":"5f22e982aababd23"}
 {"at":"2026-08-08T17:52:04.065852235+00:00","agent":"w4-shopui","kind":"released","path":"src/render/hud.rs","detail":"wave4 mb-epic.15: w4-shopui","ttl_secs":2700,"chain_hash":"4c1130baf0bd94b9"}
+{"at":"2026-08-08T17:58:53.717931642+00:00","agent":"w5-parallax","kind":"acquired","path":"src/render/background.rs","detail":"wave5 mb-epic.17: w5-parallax","ttl_secs":2700,"chain_hash":"f5915fa969fa630e"}
+{"at":"2026-08-08T17:58:55.051060773+00:00","agent":"w5-docs","kind":"acquired","path":"README.md","detail":"wave5 mb-epic.20: w5-docs","ttl_secs":2700,"chain_hash":"8972bdc7c9ee8132"}
+{"at":"2026-08-08T17:58:55.059083685+00:00","agent":"w5-docs","kind":"acquired","path":".github/workflows/ci.yml","detail":"wave5 mb-epic.20: w5-docs","ttl_secs":2700,"chain_hash":"260c81486ebd6093"}
+{"at":"2026-08-08T17:58:55.222650703+00:00","agent":"w5-juice","kind":"acquired","path":"src/render/sprites.rs","detail":"wave5 mb-epic.18: w5-juice","ttl_secs":2700,"chain_hash":"04b464c5efa03f7a"}
+{"at":"2026-08-08T17:58:55.223268777+00:00","agent":"w5-juice","kind":"acquired","path":"src/render/hud.rs","detail":"wave5 mb-epic.18: w5-juice","ttl_secs":2700,"chain_hash":"be0b455b37da65e6"}
+{"at":"2026-08-08T17:58:55.223852466+00:00","agent":"w5-juice","kind":"acquired","path":"src/render/mod.rs","detail":"wave5 mb-epic.18: w5-juice","ttl_secs":2700,"chain_hash":"e5ec8d9c8e867176"}
+{"at":"2026-08-08T17:58:56.064239850+00:00","agent":"w5-tests","kind":"acquired","path":"src/game/mod.rs","detail":"wave5 mb-epic.19: w5-tests","ttl_secs":2700,"chain_hash":"00719e68fb5952e5"}
+{"at":"2026-08-08T17:58:56.064846632+00:00","agent":"w5-tests","kind":"acquired","path":"src/game/waves.rs","detail":"wave5 mb-epic.19: w5-tests","ttl_secs":2700,"chain_hash":"36836f0586fca194"}
+{"at":"2026-08-08T17:58:56.065760172+00:00","agent":"w5-tests","kind":"acquired","path":"src/game/collide.rs","detail":"wave5 mb-epic.19: w5-tests","ttl_secs":2700,"chain_hash":"c0e8f10a744e02ad"}
+{"at":"2026-08-08T17:58:56.066462574+00:00","agent":"w5-tests","kind":"acquired","path":"src/game/weapons.rs","detail":"wave5 mb-epic.19: w5-tests","ttl_secs":2700,"chain_hash":"78660b1a41f3890a"}
+{"at":"2026-08-08T17:58:56.067076580+00:00","agent":"w5-tests","kind":"acquired","path":"src/game/shop.rs","detail":"wave5 mb-epic.19: w5-tests","ttl_secs":2700,"chain_hash":"a942ba9efb7b02d0"}
+{"at":"2026-08-08T18:00:51.674367265+00:00","agent":"w5-docs","kind":"released","path":".github/workflows/ci.yml","detail":"wave5 mb-epic.20: w5-docs","ttl_secs":2700,"chain_hash":"0d0c9d2738200534"}
+{"at":"2026-08-08T18:00:51.674580316+00:00","agent":"w5-docs","kind":"released","path":"README.md","detail":"wave5 mb-epic.20: w5-docs","ttl_secs":2700,"chain_hash":"4306435b2a99699a"}
