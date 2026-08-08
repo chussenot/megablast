@@ -59,13 +59,33 @@ pub fn level(n: usize) -> LevelScript {
     }
 }
 
-/// Placeholder until Wave 1 fills in a real teaching script: scroll only,
-/// no waves yet, so Milestone 1's "ship on an empty scrolling starfield"
-/// has real scroll data to render against.
+/// Level 1: a simple teaching script (spec: "popcorn/diver, sparse
+/// turrets") so Milestone 1's "ship on a scrolling starfield" has real
+/// data to render against. Wave 3 `levels-level1` replaces this with the
+/// full script.
 fn level_1() -> LevelScript {
     LevelScript {
         scroll_speed: 40.0,
-        waves: Vec::new(),
+        waves: vec![
+            (
+                200.0,
+                Wave {
+                    enemy: EnemyKind::Popcorn,
+                    count: 5,
+                    pattern: EntryPattern::Line,
+                    spacing: 40.0,
+                },
+            ),
+            (
+                500.0,
+                Wave {
+                    enemy: EnemyKind::Diver,
+                    count: 3,
+                    pattern: EntryPattern::V,
+                    spacing: 60.0,
+                },
+            ),
+        ],
     }
 }
 
