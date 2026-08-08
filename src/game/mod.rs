@@ -64,6 +64,11 @@ pub struct Game {
     pub score: u32,
     pub level: usize,
     pub scroll_y: f32,
+    /// Which of the 6 shop items is highlighted (0..6, wrapping) --
+    /// `pub` because `render/hud.rs`'s shop screen (Wave 4
+    /// `shop-wiring`) needs to know what to highlight. Only
+    /// `tick_shop` writes it.
+    pub shop_cursor: usize,
     scheduler: waves::Scheduler,
     pause_was_held: bool,
 }
@@ -89,6 +94,7 @@ impl Game {
             score: 0,
             level: 1,
             scroll_y: 0.0,
+            shop_cursor: 0,
             scheduler: waves::Scheduler::new(levels::level(1)),
             pause_was_held: false,
         }
