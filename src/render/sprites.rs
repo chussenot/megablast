@@ -20,8 +20,13 @@ const SHIP_COLOR: [f32; 4] = [0.75, 0.92, 1.0, 1.0];
 
 /// Builds this frame's entity quads. Milestone 1: just the ship, drawn
 /// as a square the size of its hitbox (`PLAYER_RADIUS`) at its
-/// (already-interpolated) `player_x`/`player_y` position.
-pub(super) fn build(player_x: f32, player_y: f32) -> Vec<QuadInstance> {
+/// (already-interpolated) `player_x`/`player_y` position. `game` is the
+/// live (non-interpolated) simulation state -- Wave 2 `waves-scheduler`
+/// reads `game.enemies`/`game.player_shots` from it to extend this list;
+/// only the ship's own position needs the prev/current interpolation
+/// `render::mod`'s caller already did for `player_x`/`player_y`.
+pub(super) fn build(player_x: f32, player_y: f32, game: &crate::game::Game) -> Vec<QuadInstance> {
+    let _ = game;
     vec![QuadInstance::new(
         [player_x, player_y],
         [PLAYER_RADIUS, PLAYER_RADIUS],
@@ -35,7 +40,7 @@ mod tests {
 
     #[test]
     fn build_draws_exactly_one_quad_for_the_ship_at_its_position() {
-        let instances = build(123.0, 456.0);
+        let instances = build(123.0, 456.0, &crate::game::Game::new());
 
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].center, [123.0, 456.0]);

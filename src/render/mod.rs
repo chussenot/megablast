@@ -376,7 +376,7 @@ impl Renderer {
 
         let mut instances = self.starfield.instances(drawn.scroll_y);
         let entity_start = instances.len() as u32;
-        instances.extend(sprites::build(drawn.player_x, drawn.player_y));
+        instances.extend(sprites::build(drawn.player_x, drawn.player_y, current));
         let entity_end = instances.len() as u32;
 
         self.queue
