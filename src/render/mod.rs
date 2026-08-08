@@ -2,69 +2,514 @@
 //! calls per frame (background, entities, text). Every wgpu/winit type
 //! in the crate lives under `src/render/`.
 //!
-//! Owner: Wave 1 `render-pipeline` task (this file + `background.rs` +
-//! `sprites.rs`). `main.rs` already calls `Renderer::new` / `resize` /
-//! `render` and builds `RenderState` via `From<&Game>` -- keep these
-//! signatures; everything inside their bodies is yours to design.
+//! Ported from arkanoid's `render.rs` (same wgpu 30.x / winit 0.30
+//! pipeline: one shared unit-quad vertex buffer, one instance buffer of
+//! `QuadInstance { center, half_size, color }`, one WGSL shader, sRGB
+//! surface format). Text (glyphon) is not wired up yet -- Milestone 1
+//! only needs the starfield + ship draw calls, and `frame_events` is
+//! unread for the same reason (Wave 5 `juice-fx` consumes it); both stay
+//! within the module's <= 3 draw call budget either way.
 
 mod background;
 mod hud;
 mod sprites;
 
+use std::future::Future;
+use std::mem::size_of;
 use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 
+use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 use crate::events::GameEvent;
-use crate::game::Game;
+use crate::game::{Game, PLAYFIELD_HEIGHT, PLAYFIELD_WIDTH};
+
+/// One corner of the shared unit quad every entity is drawn from. Kept in
+/// `[-1, 1]` on both axes so the vertex shader can place it with a single
+/// multiply-add against an instance's `half_size`/`center` (same trick
+/// arkanoid's `render.rs` uses).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    corner: [f32; 2],
+}
+
+/// Two triangles covering the unit quad. No index buffer: six vertices is
+/// little enough data that an index buffer would only add a second buffer
+/// to manage for no real savings.
+const QUAD_VERTICES: [Vertex; 6] = [
+    Vertex {
+        corner: [-1.0, -1.0],
+    },
+    Vertex {
+        corner: [1.0, -1.0],
+    },
+    Vertex { corner: [1.0, 1.0] },
+    Vertex {
+        corner: [-1.0, -1.0],
+    },
+    Vertex { corner: [1.0, 1.0] },
+    Vertex {
+        corner: [-1.0, 1.0],
+    },
+];
+
+/// Per-instance data for one quad: where it is, how big it is, and its
+/// color. Every drawable thing -- starfield dot, ship, and (in later
+/// waves) enemies/shots/bullets/pickups/juice quads -- becomes one of
+/// these; the pipeline itself never changes. Default (module-private)
+/// visibility is enough for `background`/`sprites` to use it: they're
+/// descendant modules of `render`, so they already see private items
+/// defined here via `super::QuadInstance`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct QuadInstance {
+    center: [f32; 2],
+    half_size: [f32; 2],
+    color: [f32; 4],
+}
+
+impl QuadInstance {
+    fn new(center: [f32; 2], half_size: [f32; 2], color: [f32; 4]) -> Self {
+        Self {
+            center,
+            half_size,
+            color,
+        }
+    }
+}
+
+/// Ceiling on total quad instances the instance buffer has room for: the
+/// starfield layer plus headroom for entities (just the ship for
+/// Milestone 1; enemies/shots/bullets/pickups and juice quads land in
+/// `sprites.rs` in later waves without needing to touch this file --
+/// bump `sprites::MAX_ENTITY_QUADS` there if a future wave's worst-case
+/// frame needs more room than it already reserves).
+const MAX_QUADS: usize = background::STAR_COUNT + sprites::MAX_ENTITY_QUADS;
+
+// The shader below hardcodes the playfield size as WGSL consts (see its
+// own comment for why). This guard catches the two numbers drifting
+// apart at compile time instead of as a silently squished/stretched
+// playfield if `game/mod.rs`'s constants ever change.
+const _: () = assert!(PLAYFIELD_WIDTH as u32 == 600 && PLAYFIELD_HEIGHT as u32 == 800);
+
+const SHADER_SRC: &str = r#"
+struct VertexInput {
+    @location(0) corner: vec2<f32>,
+};
+
+struct InstanceInput {
+    @location(1) center: vec2<f32>,
+    @location(2) half_size: vec2<f32>,
+    @location(3) color: vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+// Fixed logical playfield (spec: 600x800 portrait, letterboxed --
+// simulation space never scales on resize). Hardcoded rather than passed
+// as a uniform: the value truly never changes, so a bind group would
+// only add ceremony -- same call arkanoid made for its 800x600 field.
+// This stretches the 600x800 field to fill whatever the surface size is;
+// proper aspect-preserving letterboxing on resize is a later milestone,
+// same limitation `Renderer::resize` already documents.
+const PLAYFIELD_WIDTH: f32 = 600.0;
+const PLAYFIELD_HEIGHT: f32 = 800.0;
+
+@vertex
+fn vs_main(vert: VertexInput, inst: InstanceInput) -> VertexOutput {
+    let pixel_pos = inst.center + vert.corner * inst.half_size;
+    let ndc_x = (pixel_pos.x / PLAYFIELD_WIDTH) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (pixel_pos.y / PLAYFIELD_HEIGHT) * 2.0;
+
+    var out: VertexOutput;
+    out.clip_position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
+    out.color = inst.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return in.color;
+}
+"#;
+
+const VERTEX_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![1 => Float32x2, 2 => Float32x2, 3 => Float32x4];
 
 /// Snapshot of drawable state as of a tick boundary, so `Renderer::render`
 /// can interpolate between this and the live `Game` using `alpha` (same
-/// pattern as arkanoid's `RenderState`).
-///
-/// TODO(wave1 `render-pipeline`): capture whatever `sprites` /
-/// `background` / `hud` need to draw (player/enemy/shot/pickup
-/// positions, scroll_y, HUD numbers).
-pub struct RenderState;
+/// pattern as arkanoid's `RenderState`) -- avoids visible stutter when
+/// the display's refresh rate isn't a multiple of the 120 Hz sim rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderState {
+    player_x: f32,
+    player_y: f32,
+    scroll_y: f32,
+}
 
 impl From<&Game> for RenderState {
-    fn from(_game: &Game) -> Self {
-        RenderState
+    fn from(game: &Game) -> Self {
+        Self {
+            player_x: game.player.x,
+            player_y: game.player.y,
+            scroll_y: game.scroll_y,
+        }
     }
 }
 
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+impl RenderState {
+    /// Blends `prev` toward `curr` by `alpha` (0 = `prev`, 1 = `curr`),
+    /// clamped so a caller passing a slightly-over-budget accumulator
+    /// can't extrapolate past `curr`.
+    fn lerp(prev: &Self, curr: &Self, alpha: f32) -> Self {
+        let alpha = alpha.clamp(0.0, 1.0);
+        Self {
+            player_x: lerp(prev.player_x, curr.player_x, alpha),
+            player_y: lerp(prev.player_y, curr.player_y, alpha),
+            scroll_y: lerp(prev.scroll_y, curr.scroll_y, alpha),
+        }
+    }
+}
+
+/// Owns the wgpu instance-derived state for one window: the
+/// adapter-negotiated device/queue, the surface configured to present to
+/// that window, the one shared quad pipeline, and the starfield's fixed
+/// star layout.
 pub struct Renderer {
-    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    pipeline: wgpu::RenderPipeline,
+    quad_vertex_buffer: wgpu::Buffer,
+    instance_buffer: wgpu::Buffer,
+    starfield: background::Starfield,
 }
 
 impl Renderer {
-    /// TODO(wave1 `render-pipeline`): real wgpu init (instance / adapter /
-    /// device / queue / surface / pipeline), glyphon text renderer,
-    /// starfield + terrain buffers.
+    /// Negotiates an adapter/device for `window` and configures its
+    /// surface (sRGB format, vsync-on present mode). Blocks on
+    /// adapter/device acquisition -- this only runs once at startup, so
+    /// synchronous is simplest.
     pub fn new(window: Arc<Window>) -> Self {
-        Self { window }
+        let size = window.inner_size();
+        let instance = wgpu::Instance::default();
+        let surface = instance
+            .create_surface(window)
+            .expect("failed to create wgpu surface");
+
+        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
+        .expect("failed to find a compatible wgpu adapter");
+
+        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("megablast device"),
+            ..Default::default()
+        }))
+        .expect("failed to request wgpu device");
+
+        let caps = surface.get_capabilities(&adapter);
+        // sRGB per spec; fall back to the adapter's top preference if it
+        // somehow offers no sRGB format at all.
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(caps.formats[0]);
+        // Vsync on: FifoRelaxed where supported (avoids a stutter when
+        // the frame misses vsync by a hair), Fifo otherwise -- both are
+        // guaranteed-supported-or-better vsync modes.
+        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::FifoRelaxed) {
+            wgpu::PresentMode::FifoRelaxed
+        } else {
+            wgpu::PresentMode::Fifo
+        };
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+        };
+        surface.configure(&device, &config);
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quad shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("quad pipeline layout"),
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("quad pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<Vertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &VERTEX_ATTRS,
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<QuadInstance>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &INSTANCE_ATTRS,
+                    }),
+                ],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    // Alpha blending, not `REPLACE`: every quad drawn so
+                    // far has alpha 1.0, so blending produces the exact
+                    // same pixels `REPLACE` would -- but it's what a
+                    // future scrim/flash/trail quad (later waves) needs
+                    // to actually blend instead of painting over the
+                    // scene as a solid rectangle.
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let quad_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("quad vertices"),
+            contents: bytemuck::cast_slice(&QUAD_VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        // Written fresh every frame via `queue.write_buffer` in
+        // `render()`, so no initial contents -- just reserve room for
+        // MAX_QUADS.
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quad instances"),
+            size: (size_of::<QuadInstance>() * MAX_QUADS) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            surface,
+            device,
+            queue,
+            config,
+            pipeline,
+            quad_vertex_buffer,
+            instance_buffer,
+            starfield: background::Starfield::new(),
+        }
     }
 
-    /// TODO(wave1 `render-pipeline`): reconfigure the surface.
-    pub fn resize(&mut self, _new_size: PhysicalSize<u32>) {
-        let _ = &self.window;
+    /// Reconfigures the surface after a window resize.
+    ///
+    /// A zero-area size (window minimized) is skipped: wgpu forbids
+    /// configuring to zero, and there is nothing to render to anyway.
+    /// Scaling/letterboxing the fixed 600x800 playfield into the new
+    /// size is a later milestone -- this just keeps the surface valid so
+    /// resizing doesn't crash.
+    pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
+        if new_size.width == 0 || new_size.height == 0 {
+            return;
+        }
+        self.config.width = new_size.width;
+        self.config.height = new_size.height;
+        self.surface.configure(&self.device, &self.config);
     }
 
-    /// TODO(wave1 `render-pipeline`): draw background (`background`
-    /// module), entities (`sprites` module) interpolated between
-    /// `prev`/`current`/`alpha`, and HUD text (`hud` module -- real
-    /// content lands Wave 3+). Wave 5 `juice-fx` reads `frame_events` for
-    /// muzzle flash / death quads / screen shake / HP-bar flash -- keep
-    /// this trailing parameter even if you don't consume it yet.
+    /// Clears the surface to `clear_color`, then draws the starfield
+    /// background and the ship as instances of the shared quad pipeline
+    /// in two draw calls (background, entities) -- text/HUD is a no-op
+    /// for now (Wave 3 `hud-lives`'s job), keeping the whole frame within
+    /// the <= 3 draw call budget.
+    ///
+    /// `prev`/`current` are the render-relevant state one fixed tick
+    /// apart and `alpha` is how far into that tick the current
+    /// wall-clock frame falls (`accumulator / dt_fixed`, 0..=1) -- see
+    /// `RenderState` for why interpolating between them is what keeps
+    /// motion smooth when the display's refresh rate isn't a multiple of
+    /// 120 Hz.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
-        _clear_color: wgpu::Color,
-        _prev: &RenderState,
-        _current: &Game,
-        _alpha: f32,
+        clear_color: wgpu::Color,
+        prev: &RenderState,
+        current: &Game,
+        alpha: f32,
         _frame_events: &[GameEvent],
     ) {
+        let drawn = RenderState::lerp(prev, &RenderState::from(current), alpha);
+
+        let mut instances = self.starfield.instances(drawn.scroll_y);
+        let entity_start = instances.len() as u32;
+        instances.extend(sprites::build(drawn.player_x, drawn.player_y));
+        let entity_end = instances.len() as u32;
+
+        self.queue
+            .write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
+
+        let surface_texture = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            // Surface config no longer matches the window; reconfigure
+            // and pick it up next frame instead of presenting a stale
+            // frame.
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.config);
+                return;
+            }
+            // Transient: nothing to draw to right now, try again next
+            // frame.
+            wgpu::CurrentSurfaceTexture::Timeout
+            | wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Validation => return,
+        };
+
+        let view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame encoder"),
+            });
+        {
+            // Scoped: the render pass borrows `encoder` and must be
+            // dropped (ending the pass) before `encoder.finish()` below.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("quad pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_vertex_buffer(0, self.quad_vertex_buffer.slice(..));
+            pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            // Draw call 1: background (starfield).
+            pass.draw(0..QUAD_VERTICES.len() as u32, 0..entity_start);
+            // Draw call 2: entities (ship for Milestone 1).
+            pass.draw(0..QUAD_VERTICES.len() as u32, entity_start..entity_end);
+            // Draw call 3 (text/HUD) intentionally omitted -- no-op until
+            // Wave 3 `hud-lives` lands.
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+        self.queue.present(surface_texture);
+    }
+}
+
+/// Minimal single-purpose executor for the one-shot startup futures wgpu
+/// hands back (`request_adapter`/`request_device`). Native backends
+/// resolve these without ever really suspending; pulling in a full async
+/// runtime crate just to drive two startup calls isn't in this project's
+/// dependency budget.
+///
+/// ponytail: parks/wakes the calling thread rather than running a real
+/// reactor. Fine for a couple of startup awaits; revisit with a real
+/// executor (or add one to the dependency budget) if async work lands on
+/// a hot path later.
+fn block_on<F: Future>(future: F) -> F::Output {
+    struct ThreadWaker(std::thread::Thread);
+
+    impl Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let mut future = std::pin::pin!(future);
+    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => std::thread::park(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(player_x: f32, player_y: f32, scroll_y: f32) -> RenderState {
+        RenderState {
+            player_x,
+            player_y,
+            scroll_y,
+        }
+    }
+
+    #[test]
+    fn lerp_at_zero_and_one_returns_the_endpoints_unchanged() {
+        let prev = state(100.0, 200.0, 10.0);
+        let curr = state(140.0, 180.0, 30.0);
+
+        assert_eq!(RenderState::lerp(&prev, &curr, 0.0), prev);
+        assert_eq!(RenderState::lerp(&prev, &curr, 1.0), curr);
+    }
+
+    #[test]
+    fn lerp_at_half_is_the_midpoint() {
+        let prev = state(100.0, 200.0, 10.0);
+        let curr = state(140.0, 180.0, 30.0);
+
+        let mid = RenderState::lerp(&prev, &curr, 0.5);
+
+        assert!((mid.player_x - 120.0).abs() < 1e-4);
+        assert!((mid.player_y - 190.0).abs() < 1e-4);
+        assert!((mid.scroll_y - 20.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn lerp_clamps_an_out_of_range_alpha() {
+        let prev = state(100.0, 200.0, 10.0);
+        let curr = state(140.0, 180.0, 30.0);
+
+        assert_eq!(RenderState::lerp(&prev, &curr, -1.0), prev);
+        assert_eq!(RenderState::lerp(&prev, &curr, 2.0), curr);
     }
 }
