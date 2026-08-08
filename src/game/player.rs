@@ -90,13 +90,20 @@ impl Player {
         });
         if self.hp <= 0.0 {
             self.lives = self.lives.saturating_sub(1);
+            let (death_x, death_y) = (self.x, self.y);
             let spawn = Self::new();
             self.x = spawn.x;
             self.y = spawn.y;
             self.hp = spawn.hp;
             self.invuln_timer = INVULN_ON_RESPAWN;
-            events.push(crate::events::GameEvent::PlayerDied);
-            events.push(crate::events::GameEvent::PlayerRespawned);
+            events.push(crate::events::GameEvent::PlayerDied {
+                x: death_x,
+                y: death_y,
+            });
+            events.push(crate::events::GameEvent::PlayerRespawned {
+                x: self.x,
+                y: self.y,
+            });
             return true;
         }
         false
@@ -185,8 +192,11 @@ mod tests {
             events,
             vec![
                 GameEvent::PlayerHit { x: 5.0, y: 5.0 },
-                GameEvent::PlayerDied,
-                GameEvent::PlayerRespawned,
+                GameEvent::PlayerDied { x: 5.0, y: 5.0 },
+                GameEvent::PlayerRespawned {
+                    x: spawn.x,
+                    y: spawn.y,
+                },
             ]
         );
     }
