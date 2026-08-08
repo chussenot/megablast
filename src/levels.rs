@@ -283,13 +283,9 @@ fn level_2() -> LevelScript {
 /// on the level number gives `game::enemies` the same per-level signal
 /// without that edit.
 ///
-/// Not wired up yet -- `game::enemies`'s Boss doesn't currently take a
-/// level number anywhere along its spawn/update path. That's a follow-up
-/// for `enemies.rs`, tracked as mb-epic.22: call
-/// `levels::boss_variant(level)` at Boss spawn time, stash the result on
-/// the Boss enemy, and use it to pick the bullet color/palette for its
-/// attack patterns.
-#[allow(dead_code)]
+/// Wired in by `game::enemies`'s Boss (mb-epic.22): stashed on the Boss
+/// enemy at spawn time and stamped onto every bullet it fires, so a
+/// future render pass can pick the bullet color/palette per level.
 pub fn boss_variant(level: usize) -> u32 {
     match level {
         1 => 0,

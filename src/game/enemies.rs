@@ -74,6 +74,16 @@ pub struct Bullet {
     pub vx: f32,
     pub vy: f32,
     pub damage: u32,
+    /// `levels::boss_variant(level)` for a Boss bullet, `0` for every
+    /// other kind's -- lets a future render pass color a boss's attack
+    /// patterns differently per level (spec: "pattern colors varied";
+    /// mb-epic.22) without this file needing to know how they're drawn.
+    /// Not read anywhere in this build yet -- `boss_bullets_carry_that_
+    /// level_s_variant` below is the only consumer -- since wiring it
+    /// into a color is a render-side (`src/render/sprites.rs`) change
+    /// outside this task's scope.
+    #[allow(dead_code)]
+    pub variant: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -147,12 +157,14 @@ pub fn spawn(kind: EnemyKind, x: f32, y: f32, player_x: f32, player_y: f32) -> E
 /// shot, wall-with-a-gap, spiral of 12 -- pushing `BossPatternChanged`
 /// each time the active pattern changes (see `apply_damage` for
 /// `BossHit`, pushed there instead of `EnemyDamaged`).
+#[allow(clippy::too_many_arguments)]
 pub fn update(
     enemies: &mut [Enemy],
     bullets: &mut Vec<Bullet>,
     scroll_dy: f32,
     player_x: f32,
     player_y: f32,
+    level: usize,
     dt: f32,
     events: &mut Vec<crate::events::GameEvent>,
 ) {
@@ -193,6 +205,7 @@ pub fn update(
                         player_x,
                         player_y,
                         TURRET_BULLET_SPEED,
+                        0,
                     ));
                 }
             }
@@ -218,10 +231,20 @@ pub fn update(
                         vx: 0.0,
                         vy: WEAVER_BULLET_SPEED,
                         damage: ENEMY_BULLET_DAMAGE,
+                        variant: 0,
                     });
                 }
             }
             EnemyKind::Boss => {
+                // First tick since spawn: fix this boss's presentation
+                // variant for its whole fight (spec: "pattern colors
+                // varied" between levels) -- `entry_target_x` is Boss's
+                // free slot, same one-chance-on-first-tick trick as
+                // every other kind's cache (see `Enemy::entry_target_x`'s
+                // doc comment).
+                if e.age <= 0.0 {
+                    e.entry_target_x = crate::levels::boss_variant(level) as f32;
+                }
                 e.age += dt;
                 e.y = super::PLAYFIELD_HEIGHT / 3.0;
                 let pattern_before = boss_pattern_index(e.phase);
@@ -232,7 +255,8 @@ pub fn update(
                 let pattern_after = boss_pattern_index(e.phase);
                 if pattern_after != pattern_before {
                     events.push(crate::events::GameEvent::BossPatternChanged);
-                    fire_boss_pattern(pattern_after, e, bullets, player_x, player_y);
+                    let variant = e.entry_target_x as u32;
+                    fire_boss_pattern(pattern_after, e, bullets, player_x, player_y, variant);
                 }
             }
         }
@@ -249,7 +273,8 @@ fn crosses_interval(age_before: f32, age_after: f32, interval: f32) -> bool {
 
 /// A bullet from `(x, y)` aimed at `(target_x, target_y)` at `speed`,
 /// re-aimed fresh each call (unlike Diver's fixed one-shot dive angle).
-fn aimed_bullet(x: f32, y: f32, target_x: f32, target_y: f32, speed: f32) -> Bullet {
+/// `variant` is stamped straight onto the bullet -- see `Bullet::variant`.
+fn aimed_bullet(x: f32, y: f32, target_x: f32, target_y: f32, speed: f32, variant: u32) -> Bullet {
     let dx = target_x - x;
     let dy = target_y - y;
     let len = dx.hypot(dy).max(f32::EPSILON);
@@ -259,6 +284,7 @@ fn aimed_bullet(x: f32, y: f32, target_x: f32, target_y: f32, speed: f32) -> Bul
         vx: speed * dx / len,
         vy: speed * dy / len,
         damage: ENEMY_BULLET_DAMAGE,
+        variant,
     }
 }
 
@@ -270,12 +296,17 @@ fn boss_pattern_index(phase: f32) -> usize {
 }
 
 /// Fires the attack for `pattern` (see `boss_pattern_index`) from `e`.
+/// `variant` (`levels::boss_variant(level)`, cached on `e.entry_target_x`
+/// at spawn -- see the `Boss` arm of `update`) is stamped onto every
+/// bullet this fires, so a future render pass can color the presentation
+/// per level without this file needing to know how.
 fn fire_boss_pattern(
     pattern: usize,
     e: &Enemy,
     bullets: &mut Vec<Bullet>,
     player_x: f32,
     player_y: f32,
+    variant: u32,
 ) {
     match pattern {
         0 => bullets.push(aimed_bullet(
@@ -284,6 +315,7 @@ fn fire_boss_pattern(
             player_x,
             player_y,
             BOSS_BULLET_SPEED,
+            variant,
         )),
         1 => {
             // Wall with a gap: a horizontal row of bullets spanning the
@@ -301,6 +333,7 @@ fn fire_boss_pattern(
                     vx: 0.0,
                     vy: BOSS_BULLET_SPEED,
                     damage: ENEMY_BULLET_DAMAGE,
+                    variant,
                 });
             }
         }
@@ -318,6 +351,7 @@ fn fire_boss_pattern(
                     vx: BOSS_BULLET_SPEED * angle.cos(),
                     vy: BOSS_BULLET_SPEED * angle.sin(),
                     damage: ENEMY_BULLET_DAMAGE,
+                    variant,
                 });
             }
         }
@@ -418,6 +452,7 @@ mod tests {
                 0.0,
                 0.0,
                 0.0,
+                1,
                 1.0 / 60.0,
                 &mut events,
             );
@@ -446,6 +481,7 @@ mod tests {
             0.0,
             0.0,
             0.0,
+            1,
             1.0 / 60.0,
             &mut events,
         );
@@ -456,6 +492,7 @@ mod tests {
             0.0,
             -500.0,
             -500.0,
+            1,
             1.0,
             &mut events,
         );
@@ -494,6 +531,7 @@ mod tests {
                 0.0,
                 player_x,
                 player_y,
+                1,
                 dt,
                 &mut events,
             );
@@ -531,6 +569,7 @@ mod tests {
                 0.0,
                 player_x,
                 player_y,
+                1,
                 dt,
                 &mut events,
             );
@@ -553,6 +592,7 @@ mod tests {
             5.0,
             0.0,
             0.0,
+            1,
             1.0 / 120.0,
             &mut events,
         );
@@ -567,7 +607,16 @@ mod tests {
         let dt = 1.0 / 60.0;
         for _ in 0..600 {
             // 10 seconds.
-            update(&mut enemies, &mut bullets, 0.0, 0.0, 0.0, dt, &mut events);
+            update(
+                &mut enemies,
+                &mut bullets,
+                0.0,
+                0.0,
+                0.0,
+                1,
+                dt,
+                &mut events,
+            );
             let e = enemies[0];
             assert!(
                 (e.x - 200.0).abs() <= WEAVER_AMPLITUDE_X + 1e-2,
@@ -609,6 +658,7 @@ mod tests {
                 0.0,
                 500.0,
                 700.0,
+                1,
                 dt,
                 &mut events,
             );
@@ -632,6 +682,44 @@ mod tests {
             !bullets.is_empty(),
             "each pattern change should have fired at least one bullet"
         );
+    }
+
+    #[test]
+    fn boss_bullets_carry_that_level_s_variant() {
+        // mb-epic.22: the variant is fixed once at spawn (first tick),
+        // from `levels::boss_variant(level)`, and stamped onto every
+        // bullet the boss fires for its whole fight -- including a
+        // level whose variant happens to be 0, so this isn't trivially
+        // true just because Bullet::default-ish-zeroes everything.
+        for level in [1usize, 2] {
+            let mut enemies = vec![spawn(EnemyKind::Boss, 300.0, 200.0, 0.0, 0.0)];
+            let mut bullets = Vec::new();
+            let mut events = Vec::new();
+            let dt = 1.0 / 60.0;
+            // Past the first pattern boundary, so at least one shot fired.
+            let ticks = (BOSS_PATTERN_DURATION / dt).ceil() as usize + 1;
+            for _ in 0..ticks {
+                update(
+                    &mut enemies,
+                    &mut bullets,
+                    0.0,
+                    500.0,
+                    700.0,
+                    level,
+                    dt,
+                    &mut events,
+                );
+            }
+            assert!(
+                !bullets.is_empty(),
+                "expected at least one bullet fired by the first pattern boundary"
+            );
+            let expected = crate::levels::boss_variant(level);
+            assert!(
+                bullets.iter().all(|b| b.variant == expected),
+                "level {level}'s boss bullets should all carry variant {expected}"
+            );
+        }
     }
 
     #[test]

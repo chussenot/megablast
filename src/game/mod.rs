@@ -191,6 +191,7 @@ impl Game {
             scroll_dy,
             self.player.x,
             self.player.y,
+            self.level,
             dt,
             &mut self.events,
         );
