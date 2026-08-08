@@ -6,9 +6,12 @@
 //! pipeline: one shared unit-quad vertex buffer, one instance buffer of
 //! `QuadInstance { center, half_size, color }`, one WGSL shader, sRGB
 //! surface format; same glyphon text plumbing: `FontSystem`/`SwashCache`/
-//! `TextAtlas`/`TextRenderer`/`Viewport`). `frame_events` is still unread
-//! (Wave 5 `juice-fx` consumes it). Background + entities + text is
-//! exactly the module's <= 3 draw call budget.
+//! `TextAtlas`/`TextRenderer`/`Viewport`). `frame_events` drives Wave 5
+//! `juice-fx`: muzzle flash and enemy-death bursts (`sprites::build`), HP
+//! bar flash (`hud::build`), and screen shake (`Renderer::shake_timer`,
+//! applied as a shared per-frame offset on every instance below).
+//! Background + entities + text is exactly the module's <= 3 draw call
+//! budget.
 
 mod background;
 mod hud;
@@ -93,6 +96,22 @@ impl QuadInstance {
 /// needs more room than it already reserves.
 const MAX_QUADS: usize = background::STAR_COUNT + sprites::MAX_ENTITY_QUADS + hud::MAX_HUD_QUADS;
 
+/// Approximation of one frame's wall-clock duration, used to decay the
+/// screen-shake timer and enemy-death particles' life. `render()` has no
+/// real `dt` (it's driven by redraw requests, not the fixed-timestep sim
+/// loop) -- a fixed 60 Hz-ish decrement is the cheap option the spec
+/// explicitly allows in place of tracking an `Instant` per frame, and
+/// juice timing doesn't need to be exact.
+const APPROX_FRAME_DT: f32 = 1.0 / 60.0;
+/// Screen-shake duration on `GameEvent::BossHit` (spec: "screen shake 4
+/// px/100 ms on boss hits").
+const SHAKE_DURATION: f32 = 0.1;
+/// Screen-shake amplitude in px -- applied as one shared random offset
+/// to every instance's center per frame (spec: "cheapest: offset the
+/// whole scene by one shared random (dx,dy) per frame, not
+/// per-instance"), not a per-instance jitter.
+const SHAKE_AMPLITUDE: f32 = 4.0;
+
 // The shader below hardcodes the playfield size as WGSL consts (see its
 // own comment for why). This guard catches the two numbers drifting
 // apart at compile time instead of as a silently squished/stretched
@@ -172,6 +191,27 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
+/// Applies this frame's juice-relevant events to `Renderer`'s persistent
+/// juice-fx state: a `BossHit` (re)arms the screen-shake timer, an
+/// `EnemyDied` spawns a burst of shrinking fragments. Factored out of
+/// `Renderer::render` as a free function so this branch is testable
+/// without a wgpu device.
+fn apply_juice_events(
+    frame_events: &[GameEvent],
+    shake_timer: &mut f32,
+    death_particles: &mut Vec<sprites::DeathParticle>,
+) {
+    for event in frame_events {
+        match event {
+            GameEvent::BossHit { .. } => *shake_timer = SHAKE_DURATION,
+            GameEvent::EnemyDied { x, y, .. } => {
+                death_particles.extend(sprites::spawn_death_particles(*x, *y));
+            }
+            _ => {}
+        }
+    }
+}
+
 impl RenderState {
     /// Blends `prev` toward `curr` by `alpha` (0 = `prev`, 1 = `curr`),
     /// clamped so a caller passing a slightly-over-budget accumulator
@@ -248,6 +288,14 @@ pub struct Renderer {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
+    // -- Wave 5 `juice-fx` persistent state: counts down after a
+    // `GameEvent::BossHit`, while positive every instance this frame is
+    // offset by one shared random (dx, dy) (see `render`'s doc comment).
+    shake_timer: f32,
+    // -- Wave 5 `juice-fx`: enemy-death burst fragments that outlive a
+    // single frame, decayed and pruned every `render()` call -- see
+    // `sprites::DeathParticle`.
+    death_particles: Vec<sprites::DeathParticle>,
 }
 
 impl Renderer {
@@ -402,6 +450,8 @@ impl Renderer {
             viewport,
             atlas,
             text_renderer,
+            shake_timer: 0.0,
+            death_particles: Vec::new(),
         }
     }
 
@@ -453,17 +503,48 @@ impl Renderer {
         prev: &RenderState,
         current: &Game,
         alpha: f32,
-        _frame_events: &[GameEvent],
+        frame_events: &[GameEvent],
     ) {
+        // Juice-fx state driven by this frame's events (Wave 5): a boss
+        // hit (re)arms the shake timer, an enemy death spawns a burst of
+        // shrinking fragments that outlive this one frame.
+        apply_juice_events(
+            frame_events,
+            &mut self.shake_timer,
+            &mut self.death_particles,
+        );
+        self.shake_timer = (self.shake_timer - APPROX_FRAME_DT).max(0.0);
+        sprites::decay_death_particles(&mut self.death_particles, APPROX_FRAME_DT);
+
         let drawn = RenderState::lerp(prev, &RenderState::from(current), alpha);
 
-        let hud_draw = hud::build(&mut self.font_system, current);
+        let hud_draw = hud::build(&mut self.font_system, current, frame_events);
 
         let mut instances = self.starfield.instances(drawn.scroll_y);
         let entity_start = instances.len() as u32;
-        instances.extend(sprites::build(drawn.player_x, drawn.player_y, current));
+        instances.extend(sprites::build(
+            drawn.player_x,
+            drawn.player_y,
+            current,
+            frame_events,
+            &self.death_particles,
+        ));
         instances.extend(hud_draw.quads);
         let entity_end = instances.len() as u32;
+
+        // Screen shake (spec: "4 px/100 ms on boss hits"): one shared
+        // random offset applied to every instance's center this frame,
+        // not a per-instance jitter -- the cheapest option the spec
+        // names, and cheap enough to just always run the loop (skipped
+        // when the timer's expired since dx/dy are both 0.0 then).
+        if self.shake_timer > 0.0 {
+            let dx = rand::random_range(-SHAKE_AMPLITUDE..=SHAKE_AMPLITUDE);
+            let dy = rand::random_range(-SHAKE_AMPLITUDE..=SHAKE_AMPLITUDE);
+            for instance in &mut instances {
+                instance.center[0] += dx;
+                instance.center[1] += dy;
+            }
+        }
 
         self.queue
             .write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
@@ -630,5 +711,49 @@ mod tests {
 
         assert_eq!(RenderState::lerp(&prev, &curr, -1.0), prev);
         assert_eq!(RenderState::lerp(&prev, &curr, 2.0), curr);
+    }
+
+    #[test]
+    fn boss_hit_arms_the_shake_timer() {
+        let mut shake_timer = 0.0;
+        let mut death_particles = Vec::new();
+        let events = [GameEvent::BossHit { x: 1.0, y: 2.0 }];
+
+        apply_juice_events(&events, &mut shake_timer, &mut death_particles);
+
+        assert_eq!(shake_timer, SHAKE_DURATION);
+        assert!(death_particles.is_empty());
+    }
+
+    #[test]
+    fn enemy_died_spawns_a_death_burst() {
+        let mut shake_timer = 0.0;
+        let mut death_particles = Vec::new();
+        let events = [GameEvent::EnemyDied {
+            x: 5.0,
+            y: 6.0,
+            kind: crate::levels::EnemyKind::Popcorn,
+            credit_value: 5,
+        }];
+
+        apply_juice_events(&events, &mut shake_timer, &mut death_particles);
+
+        assert_eq!(shake_timer, 0.0);
+        assert_eq!(death_particles.len(), 4);
+    }
+
+    #[test]
+    fn unrelated_events_leave_juice_state_untouched() {
+        let mut shake_timer = 0.0;
+        let mut death_particles = Vec::new();
+        let events = [
+            GameEvent::LevelCleared,
+            GameEvent::PlayerHit { x: 0.0, y: 0.0 },
+        ];
+
+        apply_juice_events(&events, &mut shake_timer, &mut death_particles);
+
+        assert_eq!(shake_timer, 0.0);
+        assert!(death_particles.is_empty());
     }
 }
