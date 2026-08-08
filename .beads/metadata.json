@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "xenon",
+  "project_id": "f98d8c02-5650-4219-99b0-76d3c2624d39"
+}
