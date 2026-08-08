@@ -20,6 +20,7 @@
 use glyphon::cosmic_text::Align;
 use glyphon::{Buffer as TextBuffer, Color as TextColor, FontSystem};
 
+use crate::events::GameEvent;
 use crate::game::{player, shop, weapons, Game, GameState, PLAYFIELD_HEIGHT, PLAYFIELD_WIDTH};
 
 /// Headroom reserved in `mod.rs`'s shared instance buffer for this
@@ -54,6 +55,12 @@ const HP_BAR_WIDTH: f32 = 150.0;
 const HP_BAR_HEIGHT: f32 = 16.0;
 const HP_BAR_BG_COLOR: [f32; 4] = [0.25, 0.05, 0.05, 1.0];
 const HP_BAR_FILL_COLOR: [f32; 4] = [0.2, 0.85, 0.25, 1.0];
+/// HP bar fill color for the frame(s) `GameEvent::PlayerHit` is in
+/// `frame_events` -- near-white so damage reads as an unmistakable flash
+/// against the bar's normal green. Single-frame, keyed only off
+/// `frame_events` (cheapest option that satisfies the spec: no extra
+/// persistent timer state to thread through `hud::build`'s callers).
+const HP_BAR_FLASH_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// Shop screen (Wave 4 `shop-wiring`). Six purchasable items (spec
 /// order, matching `shop::Item`) plus a 7th "Leave" sentinel slot --
@@ -110,11 +117,27 @@ fn shop_item_label(loadout: &weapons::Loadout, slot: usize) -> String {
 /// HP bar bottom-left (background + fill scaled to `game.player.hp /
 /// player::MAX_HP`), cash bottom-right, score top-left, level top-center
 /// -- all in logical playfield coordinates (spec section "HUD").
-pub(super) fn build(font_system: &mut FontSystem, game: &Game) -> HudDraw {
+/// `frame_events` drives the HP-bar flash: if it contains a
+/// `GameEvent::PlayerHit` (this frame only -- see `main.rs`'s
+/// clear-after-render), the fill is drawn in `HP_BAR_FLASH_COLOR`
+/// instead of its normal green.
+pub(super) fn build(
+    font_system: &mut FontSystem,
+    game: &Game,
+    frame_events: &[GameEvent],
+) -> HudDraw {
     let bar_x = HUD_MARGIN;
     let bar_y = PLAYFIELD_HEIGHT - HUD_MARGIN - HP_BAR_HEIGHT;
     let hp_frac = (game.player.hp / player::MAX_HP).clamp(0.0, 1.0);
     let fill_width = HP_BAR_WIDTH * hp_frac;
+    let flashed = frame_events
+        .iter()
+        .any(|e| matches!(e, GameEvent::PlayerHit { .. }));
+    let fill_color = if flashed {
+        HP_BAR_FLASH_COLOR
+    } else {
+        HP_BAR_FILL_COLOR
+    };
 
     let quads = vec![
         super::QuadInstance::new(
@@ -125,7 +148,7 @@ pub(super) fn build(font_system: &mut FontSystem, game: &Game) -> HudDraw {
         super::QuadInstance::new(
             [bar_x + fill_width / 2.0, bar_y + HP_BAR_HEIGHT / 2.0],
             [fill_width / 2.0, HP_BAR_HEIGHT / 2.0],
-            HP_BAR_FILL_COLOR,
+            fill_color,
         ),
     ];
     debug_assert!(quads.len() <= MAX_HUD_QUADS);
@@ -229,4 +252,41 @@ fn build_shop(font_system: &mut FontSystem, game: &Game) -> Vec<HudText> {
     }
 
     texts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hp_bar_fill_is_normal_color_with_no_player_hit_event() {
+        let game = Game::new();
+        let mut font_system = FontSystem::new();
+
+        let draw = build(&mut font_system, &game, &[]);
+
+        assert_eq!(draw.quads[1].color, HP_BAR_FILL_COLOR);
+    }
+
+    #[test]
+    fn hp_bar_fill_flashes_white_on_player_hit_event() {
+        let game = Game::new();
+        let mut font_system = FontSystem::new();
+        let events = [GameEvent::PlayerHit { x: 1.0, y: 2.0 }];
+
+        let draw = build(&mut font_system, &game, &events);
+
+        assert_eq!(draw.quads[1].color, HP_BAR_FLASH_COLOR);
+    }
+
+    #[test]
+    fn hp_bar_fill_ignores_unrelated_events() {
+        let game = Game::new();
+        let mut font_system = FontSystem::new();
+        let events = [GameEvent::LevelCleared];
+
+        let draw = build(&mut font_system, &game, &events);
+
+        assert_eq!(draw.quads[1].color, HP_BAR_FILL_COLOR);
+    }
 }
