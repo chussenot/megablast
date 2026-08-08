@@ -15,6 +15,13 @@ pub fn circle_circle(x1: f32, y1: f32, r1: f32, x2: f32, y2: f32, r2: f32) -> bo
 }
 
 /// `(rx, ry)` is the rect's top-left corner, `(rw, rh)` its width/height.
+///
+/// Not called from live gameplay yet -- every hitbox in this build is a
+/// circle, so there's no rectangular hitbox to check against. Kept and
+/// tested per the spec's collision-math requirement; wire it in if a
+/// future rectangular hazard (e.g. the boss's wall-with-gap pattern)
+/// needs it.
+#[allow(dead_code)]
 pub fn circle_aabb(cx: f32, cy: f32, r: f32, rx: f32, ry: f32, rw: f32, rh: f32) -> bool {
     let closest_x = cx.clamp(rx, rx + rw);
     let closest_y = cy.clamp(ry, ry + rh);
@@ -27,7 +34,17 @@ pub fn circle_aabb(cx: f32, cy: f32, r: f32, rx: f32, ry: f32, rw: f32, rh: f32)
 /// between each shape's previous and current position -- the
 /// no-tunneling guard for a projectile vs. an enemy at max relative
 /// speed (spec: assert this in a test, arkanoid-style).
-#[allow(clippy::too_many_arguments)]
+///
+/// Not called from live gameplay: at this game's actual numbers (520px/s
+/// shot, ~4.3px of travel per 120Hz tick, vs. a 14px enemy + 4px shot
+/// radius = 18px combined) a single end-of-tick `circle_circle` check
+/// can't tunnel -- verified by `swept_catches_tunneling_a_naive_endpoint_
+/// check_would_miss` below, which needs deliberately smaller radii/
+/// higher relative speed to construct a real miss. Kept and tested as
+/// the spec's required no-tunneling guard; wire it into
+/// `Game::resolve_collisions` if a faster projectile or smaller hitbox
+/// ever makes tunneling possible in practice.
+#[allow(dead_code, clippy::too_many_arguments)]
 pub fn circle_circle_swept(
     x1_prev: f32,
     y1_prev: f32,

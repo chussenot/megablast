@@ -384,6 +384,18 @@ pub fn advance_pickups(pickups: &mut [Pickup], dt: f32) {
     }
 }
 
+/// Advances every enemy bullet by its own velocity -- pure physics, same
+/// shape as `weapons::advance_shots`. Bootstrap's original `tick_playing`
+/// never called an equivalent for `enemy_bullets`, so bullets appeared
+/// but never moved; caught by removing the temporary crate-wide
+/// `dead_code` allow after wave 5 (bullet `vx`/`vy` were never read).
+pub fn advance_bullets(bullets: &mut [Bullet], dt: f32) {
+    for b in bullets.iter_mut() {
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

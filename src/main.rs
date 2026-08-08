@@ -1,7 +1,6 @@
 //! Window/event loop wiring only (cloned from arkanoid's `main.rs`; see
 //! docs/megablast.md Architecture). Owner: bootstrap -- fixed for the
 //! whole build; no wave task edits this file.
-#![allow(dead_code, unused_variables)]
 
 mod events;
 mod game;

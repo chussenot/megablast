@@ -25,7 +25,6 @@ pub const PLAYFIELD_WIDTH: f32 = 600.0;
 pub const PLAYFIELD_HEIGHT: f32 = 800.0;
 
 const CONTACT_DAMAGE: f32 = 25.0;
-const BULLET_DAMAGE: f32 = 10.0;
 const TOTAL_LEVELS: usize = 2;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +168,13 @@ impl Game {
             dt,
             &mut self.events,
         );
+        enemies::advance_bullets(&mut self.enemy_bullets, dt);
+        self.enemy_bullets.retain(|b| {
+            b.y > -32.0
+                && b.y < PLAYFIELD_HEIGHT + 32.0
+                && b.x > -32.0
+                && b.x < PLAYFIELD_WIDTH + 32.0
+        });
         enemies::advance_pickups(&mut self.pickups, dt);
         self.pickups.retain(|p| p.y < PLAYFIELD_HEIGHT + 32.0);
 
@@ -314,7 +320,7 @@ impl Game {
                         &mut self.player,
                         &mut self.loadout,
                         &mut self.state,
-                        BULLET_DAMAGE,
+                        b.damage as f32,
                         &mut self.events,
                     );
                 }
