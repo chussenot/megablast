@@ -1,4 +1,8 @@
 
+# Rust build output -- shared across every agent worktree via
+# CARGO_TARGET_DIR, never committed.
+/target
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
