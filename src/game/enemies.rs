@@ -22,6 +22,30 @@ const POPCORN_DRIFT_FREQUENCY: f32 = 2.0; // rad/s (~3s sway period)
 /// Diver: constant-speed dive toward its one-shot entry target.
 const DIVER_SPEED: f32 = 220.0; // px/s
 
+/// Turret: fixed emplacement, aims fresh at the player every shot.
+const TURRET_FIRE_INTERVAL: f32 = 0.7; // s between aimed shots
+const TURRET_BULLET_SPEED: f32 = 180.0; // px/s
+
+/// Weaver: horizontal figure-eight around its spawn point via a
+/// continuously-advancing angle (`phase`), dropping straight bullets.
+const WEAVER_AMPLITUDE_X: f32 = 90.0; // px either side of spawn x
+const WEAVER_AMPLITUDE_Y: f32 = 40.0; // px above/below spawn y (figure-eight lobe)
+const WEAVER_FREQUENCY: f32 = 1.5; // rad/s
+const WEAVER_FIRE_INTERVAL: f32 = 0.5; // s between drops
+const WEAVER_BULLET_SPEED: f32 = 150.0; // px/s, straight down
+
+/// Boss: stationary in the top third, cycling 3 attack patterns every
+/// `BOSS_CYCLE_DURATION` seconds (one third of the cycle each).
+const BOSS_CYCLE_DURATION: f32 = 6.0; // s, full pattern cycle
+const BOSS_PATTERN_DURATION: f32 = 2.0; // s per pattern (cycle / 3)
+const BOSS_BULLET_SPEED: f32 = 160.0; // px/s
+const BOSS_WALL_BULLET_COUNT: usize = 10; // bullets across the wall-with-gap row
+const BOSS_SPIRAL_COUNT: usize = 12; // bullets in the spiral pattern (spec: 12)
+const BOSS_SPIRAL_ROTATION_RATE: f32 = 0.6; // rad/s, rotates the spiral cycle-to-cycle
+
+/// Flat damage every enemy bullet carries (spec: "enemy bullet 10").
+const ENEMY_BULLET_DAMAGE: u32 = 10;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Enemy {
     pub x: f32,
@@ -30,7 +54,9 @@ pub struct Enemy {
     pub hp: i32,
     pub age: f32,
     /// Diver: the ship's position at spawn time, its one-shot dive target
-    /// (spec: "no homing").
+    /// (spec: "no homing"). Weaver has no anchor slot of its own, so it
+    /// borrows this pair too (otherwise dead weight for that kind) to
+    /// cache its own spawn (x, y) -- the center its figure-eight orbits.
     pub entry_target_x: f32,
     pub entry_target_y: f32,
     /// Weaver/Boss: phase accumulator for figure-eight motion / the 6s
@@ -110,13 +136,17 @@ pub fn spawn(kind: EnemyKind, x: f32, y: f32, player_x: f32, player_y: f32) -> E
 /// constant speed toward `entry_target_*`, its direction fixed at spawn
 /// (no homing on the player's current position).
 ///
-/// TODO(wave3 `enemies-advanced`): Turret (scrolls with `scroll_dy`,
-/// aimed shots at 0.7/s, bullet speed 180), Weaver (horizontal
-/// figure-eight via `phase`, straight bullets at 0.5/s), Boss (holds in
-/// the top third, 3 attack patterns cycling every 6s via `phase` --
-/// aimed spread / wall-with-gap / spiral of 12 -- pushing
-/// `BossPatternChanged` on each switch and `BossHit` instead of
-/// `EnemyDamaged` when it takes damage; see `apply_damage`).
+/// Turret rides the background scroll (`scroll_dy`) and fires an aimed
+/// shot at the player's *current* position every `TURRET_FIRE_INTERVAL`
+/// (re-aimed fresh each shot, unlike Diver's fixed dive). Weaver orbits
+/// its spawn point in a horizontal figure-eight via the continuously
+/// advancing angle `phase`, dropping a straight-down bullet every
+/// `WEAVER_FIRE_INTERVAL`. Boss holds in the top third of the playfield
+/// and cycles 3 attack patterns every `BOSS_CYCLE_DURATION` seconds
+/// (tracked by `phase` as an elapsed-time-in-cycle accumulator): aimed
+/// shot, wall-with-a-gap, spiral of 12 -- pushing `BossPatternChanged`
+/// each time the active pattern changes (see `apply_damage` for
+/// `BossHit`, pushed there instead of `EnemyDamaged`).
 pub fn update(
     enemies: &mut [Enemy],
     bullets: &mut Vec<Bullet>,
@@ -151,32 +181,153 @@ pub fn update(
                 e.y += DIVER_SPEED * dt * e.phase.sin();
             }
             EnemyKind::Turret => {
-                // TODO(wave3 `enemies-advanced`): scroll with
-                // `scroll_dy`, aimed shots at 0.7/s, bullet speed 180.
+                // Fixed emplacement -- it doesn't move under its own
+                // power, just rides the background scroll.
+                let age_before = e.age;
                 e.age += dt;
+                e.y += scroll_dy;
+                if crosses_interval(age_before, e.age, TURRET_FIRE_INTERVAL) {
+                    bullets.push(aimed_bullet(
+                        e.x,
+                        e.y,
+                        player_x,
+                        player_y,
+                        TURRET_BULLET_SPEED,
+                    ));
+                }
             }
             EnemyKind::Weaver => {
-                // TODO(wave3 `enemies-advanced`): horizontal
-                // figure-eight via `phase`, straight bullets at 0.5/s.
+                // First tick since spawn: x/y are still the untouched
+                // spawn point, so this is the one chance to cache it as
+                // the figure-eight's anchor (see the `entry_target_*`
+                // doc comment on `Enemy` for why this pair is free to
+                // borrow here).
+                if e.age <= 0.0 {
+                    e.entry_target_x = e.x;
+                    e.entry_target_y = e.y;
+                }
+                let age_before = e.age;
                 e.age += dt;
+                e.phase += dt * WEAVER_FREQUENCY;
+                e.x = e.entry_target_x + WEAVER_AMPLITUDE_X * e.phase.sin();
+                e.y = e.entry_target_y + WEAVER_AMPLITUDE_Y * (2.0 * e.phase).sin();
+                if crosses_interval(age_before, e.age, WEAVER_FIRE_INTERVAL) {
+                    bullets.push(Bullet {
+                        x: e.x,
+                        y: e.y,
+                        vx: 0.0,
+                        vy: WEAVER_BULLET_SPEED,
+                        damage: ENEMY_BULLET_DAMAGE,
+                    });
+                }
             }
             EnemyKind::Boss => {
-                // TODO(wave3 `enemies-advanced`): hold in the top
-                // third, 3 attack patterns cycling every 6s via `phase`
-                // (aimed spread / wall-with-gap / spiral of 12), push
-                // `BossPatternChanged` on each switch.
                 e.age += dt;
+                e.y = super::PLAYFIELD_HEIGHT / 3.0;
+                let pattern_before = boss_pattern_index(e.phase);
+                e.phase += dt;
+                if e.phase >= BOSS_CYCLE_DURATION {
+                    e.phase -= BOSS_CYCLE_DURATION;
+                }
+                let pattern_after = boss_pattern_index(e.phase);
+                if pattern_after != pattern_before {
+                    events.push(crate::events::GameEvent::BossPatternChanged);
+                    fire_boss_pattern(pattern_after, e, bullets, player_x, player_y);
+                }
             }
         }
     }
-    let _ = (bullets, scroll_dy, player_x, player_y, events);
+}
+
+/// True once `age` (having just advanced from `age_before` to
+/// `age_after` by `dt`) has crossed a multiple of `interval` -- i.e. the
+/// periodic-fire cadence "every `interval` seconds" without a dedicated
+/// cooldown field.
+fn crosses_interval(age_before: f32, age_after: f32, interval: f32) -> bool {
+    (age_before / interval).floor() < (age_after / interval).floor()
+}
+
+/// A bullet from `(x, y)` aimed at `(target_x, target_y)` at `speed`,
+/// re-aimed fresh each call (unlike Diver's fixed one-shot dive angle).
+fn aimed_bullet(x: f32, y: f32, target_x: f32, target_y: f32, speed: f32) -> Bullet {
+    let dx = target_x - x;
+    let dy = target_y - y;
+    let len = dx.hypot(dy).max(f32::EPSILON);
+    Bullet {
+        x,
+        y,
+        vx: speed * dx / len,
+        vy: speed * dy / len,
+        damage: ENEMY_BULLET_DAMAGE,
+    }
+}
+
+/// Which third of the boss's `BOSS_CYCLE_DURATION`-second cycle `phase`
+/// (already wrapped into `[0, BOSS_CYCLE_DURATION)`) falls in: 0 = aimed
+/// shot, 1 = wall-with-gap, 2 = spiral of 12.
+fn boss_pattern_index(phase: f32) -> usize {
+    ((phase / BOSS_PATTERN_DURATION) as usize).min(2)
+}
+
+/// Fires the attack for `pattern` (see `boss_pattern_index`) from `e`.
+fn fire_boss_pattern(
+    pattern: usize,
+    e: &Enemy,
+    bullets: &mut Vec<Bullet>,
+    player_x: f32,
+    player_y: f32,
+) {
+    match pattern {
+        0 => bullets.push(aimed_bullet(
+            e.x,
+            e.y,
+            player_x,
+            player_y,
+            BOSS_BULLET_SPEED,
+        )),
+        1 => {
+            // Wall with a gap: a horizontal row of bullets spanning the
+            // playfield width, skipping one gap slot the player can fly
+            // through.
+            let gap = BOSS_WALL_BULLET_COUNT / 2;
+            let slot_width = super::PLAYFIELD_WIDTH / BOSS_WALL_BULLET_COUNT as f32;
+            for i in 0..BOSS_WALL_BULLET_COUNT {
+                if i == gap {
+                    continue;
+                }
+                bullets.push(Bullet {
+                    x: (i as f32 + 0.5) * slot_width,
+                    y: e.y,
+                    vx: 0.0,
+                    vy: BOSS_BULLET_SPEED,
+                    damage: ENEMY_BULLET_DAMAGE,
+                });
+            }
+        }
+        _ => {
+            // Spiral of 12, evenly spaced by angle; the rotation offset
+            // grows with the boss's own age, so each time this pattern
+            // comes back around (every full 6s cycle) it fires from a
+            // different angle -- the "rotating spiral" look.
+            let offset = e.age * BOSS_SPIRAL_ROTATION_RATE;
+            for i in 0..BOSS_SPIRAL_COUNT {
+                let angle = offset + i as f32 * std::f32::consts::TAU / BOSS_SPIRAL_COUNT as f32;
+                bullets.push(Bullet {
+                    x: e.x,
+                    y: e.y,
+                    vx: BOSS_BULLET_SPEED * angle.cos(),
+                    vy: BOSS_BULLET_SPEED * angle.sin(),
+                    damage: ENEMY_BULLET_DAMAGE,
+                });
+            }
+        }
+    }
 }
 
 /// Applies `dmg` to `enemies[idx]`. If it dies: removes it, pushes
 /// `EnemyDied`, and returns `Some(DeathInfo)` for the caller to score and
-/// pass to `maybe_drop`. Otherwise pushes `EnemyDamaged` and returns
-/// `None`. TODO(wave3): push `BossHit` instead of `EnemyDamaged` when
-/// `kind == EnemyKind::Boss`.
+/// pass to `maybe_drop`. Otherwise pushes `EnemyDamaged` -- or `BossHit`
+/// instead, when `kind == EnemyKind::Boss` -- and returns `None`.
 pub fn apply_damage(
     enemies: &mut Vec<Enemy>,
     idx: usize,
@@ -200,6 +351,9 @@ pub fn apply_damage(
             kind: e.kind,
             credit_value,
         })
+    } else if e.kind == EnemyKind::Boss {
+        events.push(crate::events::GameEvent::BossHit { x: e.x, y: e.y });
+        None
     } else {
         events.push(crate::events::GameEvent::EnemyDamaged { x: e.x, y: e.y });
         None
@@ -293,5 +447,189 @@ mod tests {
             "diver should be moving toward its target"
         );
         assert!(bullets.is_empty(), "diver must never fire");
+    }
+
+    #[test]
+    fn turret_fires_one_aimed_shot_every_0_7_seconds() {
+        let mut enemies = vec![spawn(EnemyKind::Turret, 300.0, 100.0, 0.0, 0.0)];
+        let mut bullets = Vec::new();
+        let mut events = Vec::new();
+        let dt = 1.0 / 120.0;
+        let player_x = 500.0;
+        let player_y = 700.0;
+
+        // No scroll movement here, so the turret's (x, y) stay put and
+        // the expected aim direction is easy to check against.
+        let ticks_per_interval = (TURRET_FIRE_INTERVAL / dt).ceil() as usize + 1;
+        for _ in 0..ticks_per_interval {
+            update(
+                &mut enemies,
+                &mut bullets,
+                0.0,
+                player_x,
+                player_y,
+                dt,
+                &mut events,
+            );
+        }
+        assert_eq!(
+            bullets.len(),
+            1,
+            "turret should have fired exactly once by just past {}s",
+            TURRET_FIRE_INTERVAL
+        );
+
+        let e = enemies[0];
+        let b = bullets[0];
+        let expected_angle = (player_y - e.y).atan2(player_x - e.x);
+        let actual_angle = b.vy.atan2(b.vx);
+        assert!(
+            (expected_angle - actual_angle).abs() < 1e-3,
+            "turret's bullet should be aimed at the player: expected angle {}, got {}",
+            expected_angle,
+            actual_angle
+        );
+        let speed = b.vx.hypot(b.vy);
+        assert!(
+            (speed - TURRET_BULLET_SPEED).abs() < 1e-3,
+            "turret bullet speed should be {} px/s, got {}",
+            TURRET_BULLET_SPEED,
+            speed
+        );
+
+        // A second interval should fire exactly one more shot.
+        for _ in 0..ticks_per_interval {
+            update(
+                &mut enemies,
+                &mut bullets,
+                0.0,
+                player_x,
+                player_y,
+                dt,
+                &mut events,
+            );
+        }
+        assert_eq!(
+            bullets.len(),
+            2,
+            "turret should fire again after another 0.7s"
+        );
+    }
+
+    #[test]
+    fn turret_scrolls_down_with_the_background() {
+        let mut enemies = vec![spawn(EnemyKind::Turret, 300.0, 0.0, 0.0, 0.0)];
+        let mut bullets = Vec::new();
+        let mut events = Vec::new();
+        update(
+            &mut enemies,
+            &mut bullets,
+            5.0,
+            0.0,
+            0.0,
+            1.0 / 120.0,
+            &mut events,
+        );
+        assert_eq!(enemies[0].y, 5.0, "turret should move by exactly scroll_dy");
+    }
+
+    #[test]
+    fn weaver_orbits_its_spawn_point_in_a_figure_eight_and_drops_bullets() {
+        let mut enemies = vec![spawn(EnemyKind::Weaver, 200.0, 50.0, 0.0, 0.0)];
+        let mut bullets = Vec::new();
+        let mut events = Vec::new();
+        let dt = 1.0 / 60.0;
+        for _ in 0..600 {
+            // 10 seconds.
+            update(&mut enemies, &mut bullets, 0.0, 0.0, 0.0, dt, &mut events);
+            let e = enemies[0];
+            assert!(
+                (e.x - 200.0).abs() <= WEAVER_AMPLITUDE_X + 1e-2,
+                "weaver x={} strayed beyond its horizontal amplitude around spawn x=200",
+                e.x
+            );
+            assert!(
+                (e.y - 50.0).abs() <= WEAVER_AMPLITUDE_Y + 1e-2,
+                "weaver y={} strayed beyond its vertical amplitude around spawn y=50",
+                e.y
+            );
+        }
+        assert!(
+            !bullets.is_empty(),
+            "weaver should have dropped at least one bullet over 10s at 0.5/s"
+        );
+        assert!(
+            bullets.iter().all(|b| b.vx == 0.0 && b.vy > 0.0),
+            "weaver's bullets should drop straight down"
+        );
+    }
+
+    #[test]
+    fn boss_holds_top_third_and_cycles_patterns_every_two_seconds() {
+        let mut enemies = vec![spawn(EnemyKind::Boss, 300.0, -100.0, 0.0, 0.0)];
+        let mut bullets = Vec::new();
+        let mut events = Vec::new();
+        let dt = 1.0 / 60.0;
+        let ticks_per_pattern = (BOSS_PATTERN_DURATION / dt).round() as usize;
+        // Three full 6s cycles' worth of pattern boundaries (9), plus a
+        // small buffer so the last boundary is reliably captured without
+        // reaching a 10th.
+        let total_ticks = ticks_per_pattern * 9 + 5;
+
+        for _ in 0..total_ticks {
+            update(
+                &mut enemies,
+                &mut bullets,
+                0.0,
+                500.0,
+                700.0,
+                dt,
+                &mut events,
+            );
+        }
+
+        assert_eq!(
+            enemies[0].y,
+            crate::game::PLAYFIELD_HEIGHT / 3.0,
+            "boss should hold in the top third of the playfield"
+        );
+
+        let changes = events
+            .iter()
+            .filter(|e| matches!(e, crate::events::GameEvent::BossPatternChanged))
+            .count();
+        assert_eq!(
+            changes, 9,
+            "boss should announce a pattern change every 2s across 3 full 6s cycles"
+        );
+        assert!(
+            !bullets.is_empty(),
+            "each pattern change should have fired at least one bullet"
+        );
+    }
+
+    #[test]
+    fn apply_damage_pushes_boss_hit_not_enemy_damaged_for_a_boss() {
+        let mut enemies = vec![spawn(EnemyKind::Boss, 300.0, 200.0, 0.0, 0.0)];
+        let mut events = Vec::new();
+        let death = apply_damage(&mut enemies, 0, 10, &mut events);
+        assert!(death.is_none(), "10 damage should not kill a 1200 HP boss");
+        assert_eq!(events.len(), 1);
+        match events[0] {
+            crate::events::GameEvent::BossHit { x, y } => {
+                assert_eq!(x, 300.0);
+                assert_eq!(y, 200.0);
+            }
+            other => panic!("expected BossHit for a boss, got {other:?}"),
+        }
+
+        // Non-boss kinds still get the plain EnemyDamaged event.
+        let mut popcorn = vec![spawn(EnemyKind::Popcorn, 10.0, 10.0, 0.0, 0.0)];
+        let mut events2 = Vec::new();
+        apply_damage(&mut popcorn, 0, 1, &mut events2);
+        assert!(matches!(
+            events2[0],
+            crate::events::GameEvent::EnemyDamaged { .. }
+        ));
     }
 }
