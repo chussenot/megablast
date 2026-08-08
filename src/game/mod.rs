@@ -64,13 +64,22 @@ pub struct Game {
     pub score: u32,
     pub level: usize,
     pub scroll_y: f32,
-    /// Which of the 6 shop items is highlighted (0..6, wrapping) --
+    /// Which of the shop menu's 7 slots is highlighted (0..7, wrapping)
+    /// -- slots 0..6 are Cannon/SideShots/RearShot/Drone/Repair/
+    /// ExtraLife, slot 6 is a "Leave" sentinel with no price --
     /// `pub` because `render/hud.rs`'s shop screen (Wave 4
-    /// `shop-wiring`) needs to know what to highlight. Only
-    /// `tick_shop` writes it.
+    /// `shop-wiring`) needs to know what to highlight and mirrors this
+    /// exact 7-slot shape. Only `tick_shop` writes it.
     pub shop_cursor: usize,
     scheduler: waves::Scheduler,
     pause_was_held: bool,
+    /// Shop menu's own edge-detection state: the input seen on the
+    /// previous `tick_shop` call, so held keys don't repeat every tick
+    /// and a key already held from the fight that just ended (fire to
+    /// kill the boss, arrows to dodge) can't read as a fresh press on
+    /// the shop's first tick. `None` means "just entered the shop,
+    /// seed only" -- reset there by `tick_shop` on every leave.
+    shop_prev_input: Option<Input>,
 }
 
 impl Default for Game {
@@ -97,6 +106,7 @@ impl Game {
             shop_cursor: 0,
             scheduler: waves::Scheduler::new(levels::level(1)),
             pause_was_held: false,
+            shop_prev_input: None,
         }
     }
 
@@ -174,22 +184,82 @@ impl Game {
         self.check_level_cleared();
     }
 
-    /// Real menu navigation/buy-sell input handling is Wave 4
-    /// `shop-wiring`'s job -- extend this function (this file stays
-    /// bootstrap-owned otherwise; see docs/megablast.md Milestone 4).
-    /// Leaving the shop starts the next level, or ends the game in
-    /// Victory after the last one.
+    /// Shop menu (Wave 4 `shop-wiring`): `shop_cursor` cycles over
+    /// `SHOP_SLOTS` slots -- slots `0..SHOP_ITEMS.len()` are the six
+    /// purchasable items (`SHOP_ITEMS`, same order as the spec); the
+    /// last slot is a "Leave" sentinel with no price. `render/hud.rs`
+    /// mirrors this exact slot count when it draws the shop screen, so
+    /// the two files must stay in sync if this ever changes.
+    ///
+    /// Left/right cycle the cursor; fire buys the highlighted item, or
+    /// (on the Leave sentinel) leaves the shop -- starting the next
+    /// level, or ending the game in Victory after the last one; up or
+    /// down sell the highlighted item. Deliberately never reads
+    /// `input.pause`: `debounce_pause` unconditionally re-checks it
+    /// right after this returns every tick, so touching it here would
+    /// double-fire one physical press into two meanings in the same
+    /// tick.
     fn tick_shop(&mut self, input: &Input) {
-        if !input.fire {
+        const SHOP_ITEMS: [shop::Item; 6] = [
+            shop::Item::Cannon,
+            shop::Item::SideShots,
+            shop::Item::RearShot,
+            shop::Item::Drone,
+            shop::Item::Repair,
+            shop::Item::ExtraLife,
+        ];
+        const LEAVE_SLOT: usize = SHOP_ITEMS.len();
+        const SHOP_SLOTS: usize = SHOP_ITEMS.len() + 1;
+
+        // Seed edge-detection on the shop's first tick (see
+        // `shop_prev_input`'s doc comment) instead of acting on it.
+        let Some(prev) = self.shop_prev_input.replace(*input) else {
+            return;
+        };
+
+        if input.left && !prev.left {
+            self.shop_cursor = (self.shop_cursor + SHOP_SLOTS - 1) % SHOP_SLOTS;
+        }
+        if input.right && !prev.right {
+            self.shop_cursor = (self.shop_cursor + 1) % SHOP_SLOTS;
+        }
+
+        if input.fire && !prev.fire {
+            if self.shop_cursor == LEAVE_SLOT {
+                self.shop_prev_input = None;
+                if self.level < TOTAL_LEVELS {
+                    self.level += 1;
+                    self.scheduler = waves::Scheduler::new(levels::level(self.level));
+                    self.state = GameState::Playing;
+                } else {
+                    self.state = GameState::Victory;
+                    self.events.push(GameEvent::Victory);
+                }
+            } else {
+                let item = SHOP_ITEMS[self.shop_cursor];
+                let bought = shop::buy(
+                    &mut self.shop,
+                    &mut self.loadout,
+                    &mut self.player.lives,
+                    &mut self.player.hp,
+                    player::MAX_HP,
+                    item,
+                )
+                .is_ok();
+                if bought {
+                    self.events.push(GameEvent::ShopItemBought { item });
+                }
+            }
             return;
         }
-        if self.level < TOTAL_LEVELS {
-            self.level += 1;
-            self.scheduler = waves::Scheduler::new(levels::level(self.level));
-            self.state = GameState::Playing;
-        } else {
-            self.state = GameState::Victory;
-            self.events.push(GameEvent::Victory);
+
+        let sell_now = input.up || input.down;
+        let sell_prev = prev.up || prev.down;
+        if sell_now && !sell_prev && self.shop_cursor != LEAVE_SLOT {
+            let item = SHOP_ITEMS[self.shop_cursor];
+            if shop::sell(&mut self.shop, &mut self.loadout, item).is_ok() {
+                self.events.push(GameEvent::ShopItemSold { item });
+            }
         }
     }
 
