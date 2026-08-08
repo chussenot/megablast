@@ -5,10 +5,10 @@
 //! Ported from arkanoid's `render.rs` (same wgpu 30.x / winit 0.30
 //! pipeline: one shared unit-quad vertex buffer, one instance buffer of
 //! `QuadInstance { center, half_size, color }`, one WGSL shader, sRGB
-//! surface format). Text (glyphon) is not wired up yet -- Milestone 1
-//! only needs the starfield + ship draw calls, and `frame_events` is
-//! unread for the same reason (Wave 5 `juice-fx` consumes it); both stay
-//! within the module's <= 3 draw call budget either way.
+//! surface format; same glyphon text plumbing: `FontSystem`/`SwashCache`/
+//! `TextAtlas`/`TextRenderer`/`Viewport`). `frame_events` is still unread
+//! (Wave 5 `juice-fx` consumes it). Background + entities + text is
+//! exactly the module's <= 3 draw call budget.
 
 mod background;
 mod hud;
@@ -19,6 +19,11 @@ use std::mem::size_of;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
+use glyphon::cosmic_text::Align;
+use glyphon::{
+    Attrs, Buffer as TextBuffer, Cache as TextCache, Family, FontSystem, Metrics, Resolution,
+    Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+};
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -82,12 +87,11 @@ impl QuadInstance {
 }
 
 /// Ceiling on total quad instances the instance buffer has room for: the
-/// starfield layer plus headroom for entities (just the ship for
-/// Milestone 1; enemies/shots/bullets/pickups and juice quads land in
-/// `sprites.rs` in later waves without needing to touch this file --
-/// bump `sprites::MAX_ENTITY_QUADS` there if a future wave's worst-case
-/// frame needs more room than it already reserves).
-const MAX_QUADS: usize = background::STAR_COUNT + sprites::MAX_ENTITY_QUADS;
+/// starfield layer plus headroom for entities (`sprites::MAX_ENTITY_QUADS`)
+/// plus the HUD's own quads (e.g. an HP bar, `hud::MAX_HUD_QUADS`) -- bump
+/// either constant in its own file if a future wave's worst-case frame
+/// needs more room than it already reserves.
+const MAX_QUADS: usize = background::STAR_COUNT + sprites::MAX_ENTITY_QUADS + hud::MAX_HUD_QUADS;
 
 // The shader below hardcodes the playfield size as WGSL consts (see its
 // own comment for why). This guard catches the two numbers drifting
@@ -182,6 +186,48 @@ impl RenderState {
     }
 }
 
+/// Builds a single-line (or wrapped, if it's long enough) glyphon text
+/// buffer, shaped and ready to hand to `TextRenderer::prepare` via a
+/// `TextArea` -- same helper shape as arkanoid's `make_line_buffer`.
+/// `wrap_width` also doubles as the box `align` centers/aligns within;
+/// callers building HUD text (`hud::build`) pass the full surface width
+/// for anything that should center across the screen.
+pub(super) fn make_line_buffer(
+    font_system: &mut FontSystem,
+    text: &str,
+    font_size: f32,
+    line_height: f32,
+    wrap_width: f32,
+    align: Align,
+) -> TextBuffer {
+    let mut buffer = TextBuffer::new(font_system, Metrics::new(font_size, line_height));
+    buffer.set_size(Some(wrap_width), None);
+    buffer.set_text(
+        text,
+        &Attrs::new().family(Family::SansSerif),
+        Shaping::Basic,
+        Some(align),
+    );
+    buffer.shape_until_scroll(font_system, false);
+    buffer
+}
+
+/// Builds one `TextArea` covering the whole surface horizontally at
+/// `(left, top)`, uniformly colored `color` -- every HUD text element is a
+/// single independently-positioned line/block, so they all share this one
+/// shape (same as arkanoid's `text_area`).
+fn text_area(buffer: &TextBuffer, left: f32, top: f32, color: glyphon::Color) -> TextArea<'_> {
+    TextArea {
+        buffer,
+        left,
+        top,
+        scale: 1.0,
+        bounds: TextBounds::default(),
+        default_color: color,
+        custom_glyphs: &[],
+    }
+}
+
 /// Owns the wgpu instance-derived state for one window: the
 /// adapter-negotiated device/queue, the surface configured to present to
 /// that window, the one shared quad pipeline, and the starfield's fixed
@@ -195,6 +241,13 @@ pub struct Renderer {
     quad_vertex_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
     starfield: background::Starfield,
+    // -- text: HUD cash/score/level, shop screen (Wave 4), any future
+    // overlay -- ported from arkanoid's identical setup.
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    viewport: Viewport,
+    atlas: TextAtlas,
+    text_renderer: TextRenderer,
 }
 
 impl Renderer {
@@ -323,6 +376,18 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // `text_cache` isn't kept on `Renderer`: `TextAtlas::new` clones it
+        // internally (a cheap `Arc` underneath, shared pipeline/layout
+        // state), and `Viewport` doesn't need it past construction --
+        // same as arkanoid's identical setup.
+        let font_system = FontSystem::new();
+        let swash_cache = SwashCache::new();
+        let text_cache = TextCache::new(&device);
+        let viewport = Viewport::new(&device, &text_cache);
+        let mut atlas = TextAtlas::new(&device, &queue, &text_cache, config.format);
+        let text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+
         Self {
             surface,
             device,
@@ -332,6 +397,11 @@ impl Renderer {
             quad_vertex_buffer,
             instance_buffer,
             starfield: background::Starfield::new(),
+            font_system,
+            swash_cache,
+            viewport,
+            atlas,
+            text_renderer,
         }
     }
 
@@ -351,11 +421,24 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
+    /// Maps a point in the logical 600x800 playfield to the physical
+    /// surface pixel space glyphon's `Viewport`/`TextArea` operate in,
+    /// using the same non-uniform stretch the quad vertex shader already
+    /// applies to every other quad (see `SHADER_SRC`) -- keeps HUD text
+    /// aligned with the quads at whatever size the window's been resized
+    /// to (same limitation `resize` documents: true aspect-preserving
+    /// letterboxing is a later milestone).
+    pub(super) fn to_physical(&self, x: f32, y: f32) -> (f32, f32) {
+        (
+            x / PLAYFIELD_WIDTH * self.config.width as f32,
+            y / PLAYFIELD_HEIGHT * self.config.height as f32,
+        )
+    }
+
     /// Clears the surface to `clear_color`, then draws the starfield
-    /// background and the ship as instances of the shared quad pipeline
-    /// in two draw calls (background, entities) -- text/HUD is a no-op
-    /// for now (Wave 3 `hud-lives`'s job), keeping the whole frame within
-    /// the <= 3 draw call budget.
+    /// background, entities (ship/enemies/shots/HUD quads) and HUD text
+    /// as instances of the shared quad pipeline plus one glyphon pass --
+    /// exactly 3 draw calls (background, entities, text).
     ///
     /// `prev`/`current` are the render-relevant state one fixed tick
     /// apart and `alpha` is how far into that tick the current
@@ -374,13 +457,43 @@ impl Renderer {
     ) {
         let drawn = RenderState::lerp(prev, &RenderState::from(current), alpha);
 
+        let hud_draw = hud::build(&mut self.font_system, current);
+
         let mut instances = self.starfield.instances(drawn.scroll_y);
         let entity_start = instances.len() as u32;
         instances.extend(sprites::build(drawn.player_x, drawn.player_y, current));
+        instances.extend(hud_draw.quads);
         let entity_end = instances.len() as u32;
 
         self.queue
             .write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
+
+        let text_areas: Vec<TextArea> = hud_draw
+            .texts
+            .iter()
+            .map(|t| {
+                let (x, y) = self.to_physical(t.x, t.y);
+                text_area(&t.buffer, x, y, t.color)
+            })
+            .collect();
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.config.width,
+                height: self.config.height,
+            },
+        );
+        self.text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                text_areas,
+                &mut self.swash_cache,
+            )
+            .expect("glyphon text preparation failed");
 
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
@@ -431,13 +544,19 @@ impl Renderer {
             pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             // Draw call 1: background (starfield).
             pass.draw(0..QUAD_VERTICES.len() as u32, 0..entity_start);
-            // Draw call 2: entities (ship for Milestone 1).
+            // Draw call 2: entities (ship, enemies, shots, HUD quads).
             pass.draw(0..QUAD_VERTICES.len() as u32, entity_start..entity_end);
-            // Draw call 3 (text/HUD) intentionally omitted -- no-op until
-            // Wave 3 `hud-lives` lands.
+            // Draw call 3: HUD/overlay text.
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("glyphon text render failed");
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         self.queue.present(surface_texture);
+        // Reclaims atlas space for glyphs that stopped being used this
+        // frame -- cheap no-op most frames, matters once different HUD/
+        // shop screens have all drawn text at some point in the session.
+        self.atlas.trim();
     }
 }
 
