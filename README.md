@@ -31,3 +31,11 @@ moment-to-moment action.
 ```bash
 cargo run --release
 ```
+
+## How this was built
+
+Implemented from a written spec by 20 coordinating agents across 5
+sequential waves, using git worktrees, `pact` (file leases +
+messaging), and `bd` (issue tracking). Retrospective, including where
+the coordination held and where it didn't:
+[Megablast Coordination Audit](https://claude.ai/code/artifact/818d328c-9e06-48f6-aae6-841e823d31a0).
