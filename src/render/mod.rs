@@ -90,11 +90,14 @@ impl QuadInstance {
 }
 
 /// Ceiling on total quad instances the instance buffer has room for: the
-/// starfield layer plus headroom for entities (`sprites::MAX_ENTITY_QUADS`)
-/// plus the HUD's own quads (e.g. an HP bar, `hud::MAX_HUD_QUADS`) -- bump
-/// either constant in its own file if a future wave's worst-case frame
-/// needs more room than it already reserves.
-const MAX_QUADS: usize = background::STAR_COUNT + sprites::MAX_ENTITY_QUADS + hud::MAX_HUD_QUADS;
+/// background layers (`background::BACKGROUND_QUAD_COUNT` -- both
+/// starfield layers plus the terrain band) plus headroom for entities
+/// (`sprites::MAX_ENTITY_QUADS`) plus the HUD's own quads (e.g. an HP
+/// bar, `hud::MAX_HUD_QUADS`) -- bump whichever constant in its own file
+/// if a future wave's worst-case frame needs more room than it already
+/// reserves.
+const MAX_QUADS: usize =
+    background::BACKGROUND_QUAD_COUNT + sprites::MAX_ENTITY_QUADS + hud::MAX_HUD_QUADS;
 
 /// Approximation of one frame's wall-clock duration, used to decay the
 /// screen-shake timer and enemy-death particles' life. `render()` has no
