@@ -5,8 +5,7 @@ upgrade shop between levels, built in Rust with `wgpu`.
 
 _Inspired by Xenon 2 Megablast._
 
-![Screenshot](docs/screenshot.png)
-_(screenshot pending — not yet captured)_
+![alt text](image.png)
 
 ## Controls
 
