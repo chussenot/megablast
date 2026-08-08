@@ -360,12 +360,21 @@ pub fn apply_damage(
     }
 }
 
-/// Drop table: 20% of Popcorn, 100% of everything else (spec). TODO
-/// (wave4 `drops-cash`): roll the dice with `rand`. This stub never
-/// drops, so earlier waves' collision wiring has something to call.
+/// Drop table: 20% of Popcorn, 100% of everything else (spec).
 pub fn maybe_drop(kind: EnemyKind, x: f32, y: f32, credit_value: u32) -> Option<Pickup> {
-    let _ = (kind, x, y, credit_value);
-    None
+    let chance = match kind {
+        EnemyKind::Popcorn => 0.2,
+        _ => 1.0,
+    };
+    if rand::random::<f32>() < chance {
+        Some(Pickup {
+            x,
+            y,
+            value: credit_value,
+        })
+    } else {
+        None
+    }
 }
 
 /// Advances falling pickups straight down at `PICKUP_FALL_SPEED`.
@@ -606,6 +615,46 @@ mod tests {
             !bullets.is_empty(),
             "each pattern change should have fired at least one bullet"
         );
+    }
+
+    #[test]
+    fn maybe_drop_popcorn_drops_about_20_percent_of_the_time() {
+        let trials = 10_000;
+        let drops = (0..trials)
+            .filter(|_| maybe_drop(EnemyKind::Popcorn, 0.0, 0.0, 5).is_some())
+            .count();
+        let rate = drops as f32 / trials as f32;
+        assert!(
+            (0.15..0.25).contains(&rate),
+            "popcorn drop rate {rate} should be near 0.2 over {trials} trials"
+        );
+    }
+
+    #[test]
+    fn maybe_drop_non_popcorn_always_drops() {
+        let trials = 10_000;
+        for kind in [
+            EnemyKind::Diver,
+            EnemyKind::Weaver,
+            EnemyKind::Turret,
+            EnemyKind::Boss,
+        ] {
+            let drops = (0..trials)
+                .filter(|_| maybe_drop(kind, 1.0, 2.0, 7).is_some())
+                .count();
+            assert_eq!(
+                drops, trials,
+                "{kind:?} should always drop (100%), got {drops}/{trials}"
+            );
+        }
+    }
+
+    #[test]
+    fn maybe_drop_returns_the_death_position_and_credit_value() {
+        let pickup = maybe_drop(EnemyKind::Diver, 42.0, 84.0, 10).expect("diver always drops");
+        assert_eq!(pickup.x, 42.0);
+        assert_eq!(pickup.y, 84.0);
+        assert_eq!(pickup.value, 10);
     }
 
     #[test]
